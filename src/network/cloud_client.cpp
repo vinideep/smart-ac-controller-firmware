@@ -49,19 +49,20 @@ bool CloudClient::pushTelemetry(const JsonDocument& doc) {
     serializeJson(doc, body);
 
     HTTPClient http;
+    WiFiClientSecure secureClient;
     String url = String(_backendUrl) + "/api/ingest";
 
     if (url.startsWith("https://")) {
-        WiFiClientSecure client;
-        client.setInsecure();
-        http.begin(client, url);
+        secureClient.setInsecure();
+        secureClient.setHandshakeTimeout(10);
+        http.begin(secureClient, url);
     } else {
         http.begin(url);
     }
 
     http.addHeader("Content-Type", "application/json");
     http.addHeader("Authorization", String("Bearer ") + _deviceToken);
-    http.setTimeout(4000);
+    http.setTimeout(5000);
 
     int code = http.POST(body);
     bool ok = (code == 200 || code == 201);
@@ -82,18 +83,19 @@ bool CloudClient::pushTelemetry(const JsonDocument& doc) {
 // ─── Command poll ─────────────────────────────────────────────────────────────
 bool CloudClient::pollCommands() {
     HTTPClient http;
+    WiFiClientSecure secureClient;
     String url = String(_backendUrl) + "/api/commands/pending";
 
     if (url.startsWith("https://")) {
-        WiFiClientSecure client;
-        client.setInsecure();
-        http.begin(client, url);
+        secureClient.setInsecure();
+        secureClient.setHandshakeTimeout(10);
+        http.begin(secureClient, url);
     } else {
         http.begin(url);
     }
 
     http.addHeader("Authorization", String("Bearer ") + _deviceToken);
-    http.setTimeout(3000);
+    http.setTimeout(4000);
 
     int code = http.GET();
 
