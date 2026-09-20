@@ -35,7 +35,7 @@ bool IRTransmitterDriver::sendProtocol(const uint8_t stateBytes[kAzureStateLengt
 
     // Any repeat frames separated by 21ms gap
     for (uint16_t r = 0; r < repeats; r++) {
-        delayMicroseconds(kAzureRepeatSpace);
+        delay(kAzureRepeatSpace / 1000);
         _irsend.sendRaw(rawBuf, count, 38);
     }
 
