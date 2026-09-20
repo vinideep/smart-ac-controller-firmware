@@ -68,6 +68,7 @@ bool CloudClient::pushTelemetry(const JsonDocument& doc) {
 
     if (ok) {
         _lastPushMs = millis();
+        Serial.println("[CLOUD] Telemetry pushed to server (HTTP OK)");
     } else if (code > 0) {
         Serial.printf("[CLOUD_WARN] Telemetry push failed: HTTP %d\n", code);
     } else {

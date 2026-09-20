@@ -1,4 +1,5 @@
 #include "network_manager.h"
+#include <esp_wifi.h>
 
 namespace ac::network {
 
@@ -10,11 +11,18 @@ void NetworkManager::begin(const char* ssid, const char* password, const char* h
     if (ssid && strlen(ssid) > 0) {
         _ssid = String(ssid);
         _password = password ? String(password) : "";
+        WiFi.persistent(false);
+        WiFi.disconnect(true, true);
+        delay(100);
         WiFi.mode(WIFI_STA);
+        WiFi.setSleep(false);
+        esp_wifi_set_ps(WIFI_PS_NONE);
         WiFi.setHostname(_hostname.c_str());
+        WiFi.setAutoReconnect(true);
         WiFi.begin(_ssid.c_str(), _password.c_str());
         _connecting = true;
         _connectStartTime = millis();
+        _lastReconnectAttempt = millis();
         Serial.printf("[WIFI] Connecting to SSID: %s ...\n", _ssid.c_str());
     } else {
         startAP();
@@ -22,13 +30,17 @@ void NetworkManager::begin(const char* ssid, const char* password, const char* h
 }
 
 void NetworkManager::startAP(const char* apSsid, const char* apPass) {
-    WiFi.mode(WIFI_AP);
+    if (_ssid.length() > 0) {
+        WiFi.mode(WIFI_AP_STA);
+    } else {
+        WiFi.mode(WIFI_AP);
+    }
+
     bool res = (apPass && strlen(apPass) >= 8) ? 
         WiFi.softAP(apSsid, apPass) : 
         WiFi.softAP(apSsid);
 
     _isAPMode = true;
-    _connecting = false;
     if (res) {
         Serial.printf("[WIFI_AP] Access Point started: %s (IP: %s)\n", 
                       apSsid, WiFi.softAPIP().toString().c_str());
@@ -42,29 +54,28 @@ void NetworkManager::startAP(const char* apSsid, const char* apPass) {
 }
 
 void NetworkManager::update() {
-    if (_isAPMode) return;
-
-    if (_connecting) {
-        if (WiFi.status() == WL_CONNECTED) {
+    if (WiFi.status() == WL_CONNECTED) {
+        if (_connecting || _isAPMode) {
             _connecting = false;
+            _isAPMode = false;
             Serial.printf("[WIFI] Connected! IP Address: %s (RSSI: %d dBm)\n", 
                           WiFi.localIP().toString().c_str(), WiFi.RSSI());
             if (MDNS.begin(_hostname.c_str())) {
                 MDNS.addService("http", "tcp", 80);
                 Serial.printf("[MDNS] Responder started: http://%s.local\n", _hostname.c_str());
             }
-        } else if (millis() - _connectStartTime > 15000) {
-            // Wi-Fi connection timed out after 15s -> fallback to AP mode so user is never locked out
-            Serial.println("[WIFI_TIMEOUT] Unable to connect to Wi-Fi. Launching Fallback AP...");
-            startAP();
         }
-    } else if (WiFi.status() != WL_CONNECTED) {
-        // Lost connection -> non-blocking reconnect every 10 seconds
+    } else {
         uint32_t now = millis();
-        if (now - _lastReconnectAttempt > 10000) {
+        if (_ssid.length() > 0 && (now - _lastReconnectAttempt > 8000)) {
             _lastReconnectAttempt = now;
-            Serial.println("[WIFI_RECONNECT] Attempting Wi-Fi reconnection...");
-            WiFi.reconnect();
+            if (_connecting && (now - _connectStartTime > 25000) && !_isAPMode) {
+                Serial.println("[WIFI_WARN] Initial connection slow, launching concurrent AP fallback...");
+                startAP();
+            } else {
+                Serial.printf("[WIFI] Re-attempting connection to %s...\n", _ssid.c_str());
+                WiFi.begin(_ssid.c_str(), _password.c_str());
+            }
         }
     }
 }
@@ -74,8 +85,8 @@ bool NetworkManager::isConnected() const {
 }
 
 String NetworkManager::getIPAddress() const {
-    if (_isAPMode) return WiFi.softAPIP().toString();
     if (WiFi.status() == WL_CONNECTED) return WiFi.localIP().toString();
+    if (_isAPMode) return WiFi.softAPIP().toString();
     return "0.0.0.0";
 }
 

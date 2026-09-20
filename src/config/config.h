@@ -38,7 +38,7 @@ constexpr uint32_t WDT_TIMEOUT_SECONDS = 8;
 #endif
 
 #ifndef WIFI_PASSWORD
-#define WIFI_PASSWORD "9600270332" // Set your home Wi-Fi password
+#define WIFI_PASSWORD "9600270376" // Set your home Wi-Fi password
 #endif
 
 #ifndef WIFI_HOSTNAME
