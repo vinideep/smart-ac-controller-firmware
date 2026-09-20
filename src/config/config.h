@@ -52,7 +52,7 @@ constexpr uint32_t WDT_TIMEOUT_SECONDS = 8;
 // Leave BACKEND_URL empty to disable cloud push (local-only / serial mode).
 // ──────────────────────────────────────────────────────────────────
 #ifndef BACKEND_URL
-#define BACKEND_URL ""  // e.g. "https://smart-ac.up.railway.app"
+#define BACKEND_URL "https://deepi-home-server.tail07616e.ts.net"  // e.g. "https://smart-ac.up.railway.app"
 #endif
 
 #ifndef DEVICE_TOKEN

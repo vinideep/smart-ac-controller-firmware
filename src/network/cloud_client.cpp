@@ -1,6 +1,7 @@
 #include "cloud_client.h"
 #include "../config/config.h"
 #include <HTTPClient.h>
+#include <WiFiClientSecure.h>
 #include <WiFi.h>
 
 namespace ac {
@@ -50,7 +51,14 @@ bool CloudClient::pushTelemetry(const JsonDocument& doc) {
     HTTPClient http;
     String url = String(_backendUrl) + "/api/ingest";
 
-    http.begin(url);
+    if (url.startsWith("https://")) {
+        WiFiClientSecure client;
+        client.setInsecure();
+        http.begin(client, url);
+    } else {
+        http.begin(url);
+    }
+
     http.addHeader("Content-Type", "application/json");
     http.addHeader("Authorization", String("Bearer ") + _deviceToken);
     http.setTimeout(4000);
@@ -75,7 +83,14 @@ bool CloudClient::pollCommands() {
     HTTPClient http;
     String url = String(_backendUrl) + "/api/commands/pending";
 
-    http.begin(url);
+    if (url.startsWith("https://")) {
+        WiFiClientSecure client;
+        client.setInsecure();
+        http.begin(client, url);
+    } else {
+        http.begin(url);
+    }
+
     http.addHeader("Authorization", String("Bearer ") + _deviceToken);
     http.setTimeout(3000);
 
