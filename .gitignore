@@ -1,0 +1,9 @@
+.pio
+.pioenvs
+.piolibdeps
+.clangd
+.DS_Store
+__pycache__
+test_firmware
+*.bin
+*.elf
