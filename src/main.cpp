@@ -21,7 +21,7 @@ ac::sensors::PresenceSensorDriver presenceSensor(IR_OBSTACLE_PIN);
 ac::sensors::EnergyMonitor energyMonitor(8.0f, 230.0f); // Configurable tariff ₹8.0/kWh, nominal 230V
 ac::ir::IRReceiverDriver irReceiver(IR_RX_PIN, ac::ir::kCaptureBufferSize, ac::ir::kTimeout);
 ac::control::AzureEssenceController acController(IR_TX_PIN);
-ac::safety::SafetyManager safetyManager(180000, 180000, 5000); // 3m min on/off, 5s throttle
+ac::safety::SafetyManager safetyManager(10000, 10000, 2000); // 10s min on/off for automation, 2s throttle
 ac::automation::AutomationEngine automationEngine(acController, safetyManager, presenceSensor, dhtDriver);
 // Device identity
 String deviceId;
@@ -113,13 +113,11 @@ void processCommand(const String& rawCmd) {
             const char* commandType = doc["cmd"] | "";
             if (strcmp(commandType, "power") == 0) {
                 bool pwr = doc["value"] | false;
-                const char* reason = nullptr;
-                if (pwr ? safetyManager.canTurnOn(millis(), reason) : safetyManager.canTurnOff(millis(), reason)) {
-                    acController.setPower(pwr, "serial_json");
-                    safetyManager.recordPowerTransition(pwr, millis());
-                } else {
-                    Serial.printf("[SAFETY_BLOCKED] %s\n", reason ? reason : "rejected");
-                }
+                digitalWrite(STATUS_LED_PIN, HIGH);
+                acController.setPower(pwr, "json_cmd");
+                safetyManager.recordPowerTransition(pwr, millis());
+                digitalWrite(STATUS_LED_PIN, LOW);
+                Serial.printf("[CMD_OK] AC Power set to %s\n", pwr ? "ON" : "OFF");
             } else if (strcmp(commandType, "temp") == 0) {
                 uint8_t t = doc["value"] | 25;
                 acController.setTemperature(t, "serial_json");
@@ -152,27 +150,17 @@ void processCommand(const String& rawCmd) {
     upper.toUpperCase();
 
     if (upper == "POWER_ON" || upper == "ON") {
-        const char* reason = nullptr;
-        if (safetyManager.canTurnOn(millis(), reason)) {
-            digitalWrite(STATUS_LED_PIN, HIGH);
-            acController.setPower(true, "serial");
-            safetyManager.recordPowerTransition(true, millis());
-            digitalWrite(STATUS_LED_PIN, LOW);
-            Serial.println("[CMD_OK] AC Power ON sent");
-        } else {
-            Serial.printf("[SAFETY_BLOCKED] %s\n", reason ? reason : "rejected");
-        }
+        digitalWrite(STATUS_LED_PIN, HIGH);
+        acController.setPower(true, "manual_cmd");
+        safetyManager.recordPowerTransition(true, millis());
+        digitalWrite(STATUS_LED_PIN, LOW);
+        Serial.println("[CMD_OK] AC Power ON sent");
     } else if (upper == "POWER_OFF" || upper == "OFF") {
-        const char* reason = nullptr;
-        if (safetyManager.canTurnOff(millis(), reason)) {
-            digitalWrite(STATUS_LED_PIN, HIGH);
-            acController.setPower(false, "serial");
-            safetyManager.recordPowerTransition(false, millis());
-            digitalWrite(STATUS_LED_PIN, LOW);
-            Serial.println("[CMD_OK] AC Power OFF sent");
-        } else {
-            Serial.printf("[SAFETY_BLOCKED] %s\n", reason ? reason : "rejected");
-        }
+        digitalWrite(STATUS_LED_PIN, HIGH);
+        acController.setPower(false, "manual_cmd");
+        safetyManager.recordPowerTransition(false, millis());
+        digitalWrite(STATUS_LED_PIN, LOW);
+        Serial.println("[CMD_OK] AC Power OFF sent");
     } else if (upper.startsWith("SET_TEMP")) {
         int spaceIdx = upper.indexOf(' ');
         if (spaceIdx > 0) {
@@ -336,10 +324,19 @@ void loop() {
 
         cloudClient.update(cloudDoc);
 
+        bool hadCmd = false;
         while (cloudClient.hasCommand()) {
             String cloudCmd = cloudClient.dequeueCommand();
             Serial.printf("[CLOUD] Executing: %s\n", cloudCmd.c_str());
             processCommand(cloudCmd);
+            hadCmd = true;
+        }
+        if (hadCmd) {
+            cloudDoc["power"] = acController.getState().power;
+            cloudDoc["temperature"] = acController.getState().temperature;
+            cloudDoc["mode"] = acController.getState().mode;
+            cloudDoc["fan_speed"] = acController.getState().fanSpeed;
+            cloudClient.update(cloudDoc);
         }
     }
 
