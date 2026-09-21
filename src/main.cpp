@@ -253,10 +253,47 @@ void loop() {
     // 1. Reset Watchdog Timer
     esp_task_wdt_reset();
 
-    // 2. Poll IR Learning Receiver (non-blocking)
-    irReceiver.update(deviceId);
+    // 2. Poll IR Learning Receiver (non-blocking) & Mirror AC State
+    if (irReceiver.update(deviceId)) {
+        if (irReceiver.hasLastCapture()) {
+            const ac::ir::IRCaptureInfo& cap = irReceiver.getLastCapture();
+            if (cap.hasAcState) {
+                acController.applyExternalState(cap.acState);
+                if (cloudClient.isEnabled()) {
+                    JsonDocument syncDoc;
+                    syncDoc["device_id"] = deviceId;
+                    syncDoc["power"] = cap.acState.power;
+                    syncDoc["temperature"] = cap.acState.temperature;
+                    syncDoc["mode"] = cap.acState.mode;
+                    syncDoc["fan_speed"] = cap.acState.fanSpeed;
+                    syncDoc["source"] = "ir_remote";
+                    syncDoc["timestamp_ms"] = millis();
+                    cloudClient.update(syncDoc);
+                }
+            }
+            if (cloudClient.isEnabled()) {
+                JsonDocument irDoc;
+                irDoc["device_id"] = deviceId;
+                irDoc["type"] = "ir_capture";
+                irDoc["protocol"] = cap.protocol;
+                irDoc["bits"] = cap.bits;
+                irDoc["hex"] = cap.hexCode;
+                irDoc["is_ac"] = cap.isAc;
+                if (cap.hasAcState) {
+                    irDoc["ac_power"] = cap.acState.power;
+                    irDoc["ac_temp"] = cap.acState.temperature;
+                    irDoc["ac_mode"] = cap.acState.mode;
+                    irDoc["ac_fan"] = cap.acState.fanSpeed;
+                }
+                irDoc["timestamp_ms"] = cap.timestampMs;
+                cloudClient.update(irDoc);
+            }
+            irReceiver.clearLastCapture();
+        }
+    }
 
-    // 3. Update Presence Sensor Driver
+    // 3. Update Presence Sensor Driver (only if hardware physically installed)
+#if HAS_PRESENCE_SENSOR
     if (presenceSensor.update()) {
         JsonDocument doc;
         presenceSensor.toJSON(doc);
@@ -267,6 +304,7 @@ void loop() {
         serializeJson(doc, out);
         Serial.println(out);
     }
+#endif
 
     // 4. Update Local Automation Engine
     automationEngine.update();
@@ -287,7 +325,6 @@ void loop() {
             currentNow
         );
     }
-
 
     // 6. Update Network Manager & Local REST API Server
     networkManager.update();
@@ -313,13 +350,24 @@ void loop() {
         cloudDoc["device_id"] = deviceId;
         cloudDoc["temperature_c"] = dhtReading.temperature_c;
         cloudDoc["humidity_percent"] = dhtReading.humidity_percent;
+        cloudDoc["heat_index_c"] = dhtReading.heat_index_c;
+        cloudDoc["dew_point_c"] = dhtReading.dew_point_c;
+        cloudDoc["comfort_status"] = dhtReading.comfort_status;
+        cloudDoc["mold_risk_score"] = dhtReading.mold_risk_score;
+        cloudDoc["mold_risk_level"] = dhtReading.mold_risk_level;
+        cloudDoc["thermal_rate_c_per_hr"] = dhtReading.thermal_rate_c_per_hr;
+        cloudDoc["vpd_kpa"] = dhtReading.vpd_kpa;
         cloudDoc["valid"] = dhtReading.valid;
         cloudDoc["sensor_status"] = dhtReading.valid ? "ok" : "stale";
         cloudDoc["power"] = acController.getState().power;
         cloudDoc["temperature"] = acController.getState().temperature;
         cloudDoc["mode"] = acController.getState().mode;
         cloudDoc["fan_speed"] = acController.getState().fanSpeed;
-        cloudDoc["presence"] = presenceSensor.isPresent();
+        cloudDoc["presence"] = HAS_PRESENCE_SENSOR ? presenceSensor.isPresent() : false;
+        cloudDoc["presence_installed"] = HAS_PRESENCE_SENSOR;
+        cloudDoc["ir_tx_installed"] = HAS_IR_TRANSMITTER;
+        cloudDoc["ir_rx_installed"] = true;
+        cloudDoc["dht22_installed"] = true;
         cloudDoc["timestamp_ms"] = millis();
 
         cloudClient.update(cloudDoc);

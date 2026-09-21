@@ -1,4 +1,5 @@
 #include "ir_receiver.h"
+#include "ir_protocol_azure.h"
 #include <ArduinoJson.h>
 
 namespace _IRrecv {
@@ -49,6 +50,32 @@ bool IRReceiverDriver::update(const String& deviceId) {
 
             digitalWrite(STATUS_LED_PIN, HIGH);
             printStructuredOutput(_results, deviceId);
+
+            _lastCapture.hasData = true;
+            _lastCapture.protocol = typeToString(_results.decode_type, _results.repeat);
+            _lastCapture.protocolNum = (int16_t)_results.decode_type;
+            _lastCapture.bits = _results.bits;
+            _lastCapture.hexCode = resultToHexidecimal(&_results);
+            _lastCapture.timestampMs = millis();
+            _lastCapture.isAc = hasACState(_results.decode_type);
+            _lastCapture.hasAcState = false;
+
+            // Attempt to decode Azure Essence frame from raw timing transitions
+            std::unique_ptr<uint16_t[]> rawPtr(resultToRawArray(&_results));
+            uint16_t rawLen = getCorrectedRawLength(&_results);
+            if (rawPtr && rawLen >= 146) {
+                if (AzureEssenceProtocol::decodeRaw(rawPtr.get(), rawLen, _lastCapture.acState)) {
+                    _lastCapture.hasAcState = true;
+                    _lastCapture.isAc = true;
+                    _lastCapture.protocol = "AZURE_ESSENCE";
+                    Serial.printf("[IR_SNOOPER] Decoded Azure Essence remote command: Power=%s Temp=%dC Mode=%s Fan=%s\n",
+                                  _lastCapture.acState.power ? "ON" : "OFF",
+                                  _lastCapture.acState.temperature,
+                                  _lastCapture.acState.mode.c_str(),
+                                  _lastCapture.acState.fanSpeed.c_str());
+                }
+            }
+
             digitalWrite(STATUS_LED_PIN, LOW);
             _irrecv.resume();
             return true;

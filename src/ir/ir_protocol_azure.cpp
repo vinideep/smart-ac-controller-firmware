@@ -97,6 +97,42 @@ bool AzureEssenceProtocol::decode(const uint8_t inBytes[kAzureStateLength], cont
     return true;
 }
 
+bool AzureEssenceProtocol::decodeRaw(const uint16_t* raw, uint16_t rawLen, control::ACState& outState) {
+    if (raw == nullptr || rawLen < 146) {
+        return false;
+    }
+
+    // Header validation (Mark ~4500us, Space ~2400us with generous sensor tolerance)
+    if (raw[0] < 3000 || raw[0] > 6000) return false;
+    if (raw[1] < 1500 || raw[1] > 3300) return false;
+
+    uint8_t stateBytes[kAzureStateLength] = {0};
+    uint16_t idx = 2;
+
+    for (uint8_t byteIdx = 0; byteIdx < kAzureStateLength; byteIdx++) {
+        uint8_t byteVal = 0;
+        for (uint8_t bit = 0; bit < 8; bit++) {
+            if (idx + 1 >= rawLen) return false;
+            uint16_t mark = raw[idx++];
+            uint16_t space = raw[idx++];
+
+            if (mark < 150 || mark > 900) return false;
+
+            // Space: logical 1 is ~970us (700-1500us), logical 0 is ~470us (150-699us)
+            if (space >= 700 && space <= 1500) {
+                byteVal |= (1 << bit);
+            } else if (space >= 150 && space < 700) {
+                // 0 bit
+            } else {
+                return false; // Timing violation
+            }
+        }
+        stateBytes[byteIdx] = byteVal;
+    }
+
+    return decode(stateBytes, outState);
+}
+
 uint16_t AzureEssenceProtocol::generateRaw(const uint8_t state[kAzureStateLength], uint16_t* outRaw, uint16_t maxLen) {
     if (outRaw == nullptr || maxLen < kAzureRawTransitions) {
         return 0;

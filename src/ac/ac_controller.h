@@ -46,6 +46,8 @@ public:
     const ACState& getState() const override { return _state; }
     bool sendState(const String& source = "user") override;
 
+    void applyExternalState(const ACState& newState);
+
     // Minimum and maximum validated temperature range
     static constexpr uint8_t kMinTemperature = 16;
     static constexpr uint8_t kMaxTemperature = 31;

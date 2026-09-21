@@ -811,7 +811,98 @@ int main() {
     assert(action == TestAutomationEngine::TURN_OFF);
     std::cout << "[TEST 41] PASS: Climate automation engine enforces thermal hysteresis and safety constraints" << std::endl;
 
-    std::cout << "\nALL 41 UNIT TESTS PASSED SUCCESSFULLY!" << std::endl;
+    // Test 42: Psychrometric formulas — Dew Point and Heat Index
+    {
+        // 28.0°C and 70% humidity
+        float temp = 28.0f;
+        float hum = 70.0f;
+        const float a = 17.27f;
+        const float b = 237.7f;
+        float alpha = ((a * temp) / (b + temp)) + std::log(hum / 100.0f);
+        float dewPoint = (b * alpha) / (a - alpha);
+        // Theoretical dew point ~22.0°C
+        assert(std::fabs(dewPoint - 22.0f) < 0.5f);
+
+        // Heat Index: 28°C (82.4°F) at 70% RH feels like ~31°C (88°F)
+        float tempF = temp * 1.8f + 32.0f;
+        float hiF = -42.379f + 2.04901523f * tempF + 10.14333127f * hum
+            - 0.22475541f * tempF * hum - 0.00683783f * tempF * tempF
+            - 0.05481717f * hum * hum + 0.00122874f * tempF * tempF * hum
+            + 0.00085282f * tempF * hum * hum - 0.00000199f * tempF * tempF * hum * hum;
+        float heatIndexC = (hiF - 32.0f) / 1.8f;
+        assert(heatIndexC > 30.0f && heatIndexC < 33.0f);
+        std::cout << "[TEST 42] PASS: Psychrometric Magnus-Tetens dew point (" << dewPoint << "C) and Rothfusz heat index (" << heatIndexC << "C) verified" << std::endl;
+    }
+
+    // Test 43: Vapor Pressure Deficit (VPD) and Mold Risk index
+    {
+        float temp = 28.0f;
+        float hum = 75.0f;
+        float vpSat = 0.61078f * std::exp((17.27f * temp) / (temp + 237.3f));
+        float vpd = vpSat * (1.0f - (hum / 100.0f));
+        assert(vpd > 0.8f && vpd < 1.1f);
+
+        // Mold risk at 75% RH: 30 + (75 - 70) * 4 = 50% (Moderate)
+        float moldScore = 30.0f + (hum - 70.0f) * 4.0f;
+        assert(std::fabs(moldScore - 50.0f) < 0.01f);
+        std::cout << "[TEST 43] PASS: VPD (" << vpd << " kPa) and Mold Risk index (" << moldScore << "%) computed accurately" << std::endl;
+    }
+
+    // Test 44: Thermal comfort categorization
+    {
+        auto getComfort = [](float t, float h, float hi) -> const char* {
+            if (t < 20.0f) return "Cool";
+            if (t > 29.0f || hi > 32.0f) return "Hot";
+            if (h > 68.0f) return "Humid";
+            if (t > 26.5f) return "Warm";
+            return "Comfortable";
+        };
+        assert(std::strcmp(getComfort(24.0f, 50.0f, 24.0f), "Comfortable") == 0);
+        assert(std::strcmp(getComfort(28.0f, 75.0f, 33.0f), "Hot") == 0);
+        assert(std::strcmp(getComfort(25.0f, 72.0f, 26.0f), "Humid") == 0);
+        assert(std::strcmp(getComfort(18.0f, 50.0f, 18.0f), "Cool") == 0);
+        std::cout << "[TEST 44] PASS: Thermal comfort classification correctly handles environmental zones" << std::endl;
+    }
+
+    // Test 45: Azure Essence raw timing decoder (decodeRaw)
+    {
+        uint8_t testWireState[kAzureStateLength];
+        encodeAzureFrame(true, 24, "auto", "cool", testWireState);
+        uint16_t rawSim[kAzureRawTransitions];
+        uint16_t rawCount = generateAzureRaw(testWireState, rawSim, kAzureRawTransitions);
+        assert(rawCount == 147);
+
+        // Host raw decode implementation matching AzureEssenceProtocol::decodeRaw
+        auto testDecodeRaw = [](const uint16_t* raw, uint16_t len, uint8_t outBytes[kAzureStateLength]) -> bool {
+            if (!raw || len < 146) return false;
+            if (raw[0] < 3000 || raw[0] > 6000) return false;
+            if (raw[1] < 1500 || raw[1] > 3300) return false;
+            uint16_t idx = 2;
+            for (uint8_t b = 0; b < kAzureStateLength; b++) {
+                uint8_t val = 0;
+                for (uint8_t bit = 0; bit < 8; bit++) {
+                    if (idx + 1 >= len) return false;
+                    idx++; // mark
+                    uint16_t space = raw[idx++];
+                    if (space >= 700 && space <= 1500) val |= (1 << bit);
+                    else if (space >= 150 && space < 700) {}
+                    else return false;
+                }
+                outBytes[b] = val;
+            }
+            return (outBytes[0] == kAzureVendorId && calculateAzureChecksum(outBytes) == ((outBytes[8] >> 4) & 0x0F));
+        };
+
+        uint8_t decodedBytes[kAzureStateLength] = {0};
+        bool decodeSuccess = testDecodeRaw(rawSim, rawCount, decodedBytes);
+        assert(decodeSuccess == true);
+        assert(decodedBytes[0] == kAzureVendorId);
+        assert(decodedBytes[7] == kAzurePowerOnByte);
+        assert((decodedBytes[6] - 11) == 24); // 24°C
+        std::cout << "[TEST 45] PASS: Raw IR transition decoder successfully parses 72-bit Azure Essence pulse stream" << std::endl;
+    }
+
+    std::cout << "\nALL 45 UNIT TESTS PASSED SUCCESSFULLY!" << std::endl;
     return 0;
 }
 

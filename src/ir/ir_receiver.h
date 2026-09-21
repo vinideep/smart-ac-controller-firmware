@@ -5,6 +5,7 @@
 #include <IRac.h>
 #include <memory>
 #include "../config/pins.h"
+#include "../ac/ac_state.h"
 
 namespace ac::ir {
 
@@ -21,6 +22,18 @@ struct IRCaptureSummary {
     bool overflow = false;
     bool isAc = false;
     uint16_t rawLength = 0;
+    uint32_t timestampMs = 0;
+};
+
+struct IRCaptureInfo {
+    bool hasData = false;
+    String protocol;
+    int16_t protocolNum = -1;
+    uint16_t bits = 0;
+    String hexCode;
+    bool isAc = false;
+    bool hasAcState = false;
+    control::ACState acState;
     uint32_t timestampMs = 0;
 };
 
@@ -42,6 +55,10 @@ public:
     uint16_t getRawLen() const;
     uint8_t getRcvState() const;
 
+    bool hasLastCapture() const { return _lastCapture.hasData; }
+    const IRCaptureInfo& getLastCapture() const { return _lastCapture; }
+    void clearLastCapture() { _lastCapture.hasData = false; }
+
     static void printStructuredOutput(const decode_results& results, const String& deviceId);
     static void printJSONOutput(const decode_results& results, const String& deviceId,
                                 const uint16_t* rawData = nullptr, uint16_t rawLength = 0);
@@ -54,6 +71,7 @@ private:
     decode_results _results;
     uint32_t _captureCount = 0;
     bool _initialized = false;
+    IRCaptureInfo _lastCapture;
 };
 
 } // namespace ac::ir

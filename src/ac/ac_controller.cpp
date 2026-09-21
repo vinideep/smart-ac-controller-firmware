@@ -82,4 +82,15 @@ bool AzureEssenceController::sendState(const String& source) {
     return _transmitter.sendAcState(_state, 1);
 }
 
+void AzureEssenceController::applyExternalState(const ACState& newState) {
+    _state.power = newState.power;
+    _state.temperature = newState.temperature;
+    _state.mode = newState.mode;
+    _state.fanSpeed = newState.fanSpeed;
+    _state.source = "ir_remote";
+    _state.timestamp = millis();
+    Serial.printf("[AC_MIRROR] State updated from remote IR: Power=%s Temp=%dC Mode=%s Fan=%s\n",
+                  _state.power ? "ON" : "OFF", _state.temperature, _state.mode.c_str(), _state.fanSpeed.c_str());
+}
+
 } // namespace ac::control

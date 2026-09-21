@@ -9,6 +9,13 @@ struct DHTReading {
     float humidity = 0.0f;
     float temperature_c = 0.0f;
     float humidity_percent = 0.0f;
+    float heat_index_c = 0.0f;
+    float dew_point_c = 0.0f;
+    float mold_risk_score = 0.0f;
+    const char* mold_risk_level = "Safe";
+    const char* comfort_status = "Comfortable";
+    float thermal_rate_c_per_hr = 0.0f;
+    float vpd_kpa = 0.0f;
     uint32_t timestamp_ms = 0;
     const char* status = "not_ready";
     bool valid = false;
@@ -44,5 +51,12 @@ private:
     uint8_t _consecutiveErrors = 0;
     bool _initialized = false;
 
+    // Rolling history for room thermal dynamics (°C/hr)
+    float _historyTemps[10] = {0};
+    uint32_t _historyTimes[10] = {0};
+    uint8_t _historyCount = 0;
+    uint8_t _historyIdx = 0;
+
     bool validateReading(float temp, float hum, const char*& errorReason);
+    void computePsychrometrics(float temp, float hum, uint32_t now);
 };

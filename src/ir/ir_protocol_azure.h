@@ -52,6 +52,11 @@ public:
     static bool decode(const uint8_t inBytes[kAzureStateLength], control::ACState& outState);
 
     /**
+     * @brief Decode raw microsecond timing transitions into an ACState struct.
+     */
+    static bool decodeRaw(const uint16_t* raw, uint16_t rawLen, control::ACState& outState);
+
+    /**
      * @brief Generate raw microsecond timing transitions from 9-byte state for IRsend::sendRaw.
      * @param state 9-byte wire representation
      * @param outRaw Output array (must have space for at least kAzureRawTransitions elements)

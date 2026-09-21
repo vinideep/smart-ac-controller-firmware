@@ -81,11 +81,20 @@ void TelemetryManager::printReadingJSON(const DHTReading& reading, const String&
         doc["humidity"] = roundedHum;
         doc["temperature_c"] = roundedTemp;
         doc["humidity_percent"] = roundedHum;
+        doc["heat_index_c"] = round(reading.heat_index_c * 10.0f) / 10.0f;
+        doc["dew_point_c"] = round(reading.dew_point_c * 10.0f) / 10.0f;
+        doc["comfort_status"] = reading.comfort_status;
+        doc["mold_risk_score"] = round(reading.mold_risk_score);
+        doc["mold_risk_level"] = reading.mold_risk_level;
+        doc["thermal_rate_c_per_hr"] = round(reading.thermal_rate_c_per_hr * 10.0f) / 10.0f;
+        doc["vpd_kpa"] = round(reading.vpd_kpa * 100.0f) / 100.0f;
     } else {
         doc["temperature"] = nullptr;
         doc["humidity"] = nullptr;
         doc["temperature_c"] = nullptr;
         doc["humidity_percent"] = nullptr;
+        doc["heat_index_c"] = nullptr;
+        doc["dew_point_c"] = nullptr;
     }
 
     doc["sensor_status"] = reading.status;

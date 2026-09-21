@@ -59,6 +59,15 @@ constexpr uint32_t WDT_TIMEOUT_SECONDS = 8;
 #define DEVICE_TOKEN "change-me-to-a-secret-token"
 #endif
 
+// Hardware Module Attachment Flags
+#ifndef HAS_PRESENCE_SENSOR
+#define HAS_PRESENCE_SENSOR false
+#endif
+
+#ifndef HAS_IR_TRANSMITTER
+#define HAS_IR_TRANSMITTER false
+#endif
+
 // How often ESP32 pushes telemetry to backend (milliseconds)
 constexpr uint32_t CLOUD_TELEMETRY_INTERVAL_MS = 3000;
 
