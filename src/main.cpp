@@ -140,6 +140,21 @@ void processCommand(const String& rawCmd) {
                 } else {
                     Serial.println("[CMD_ERR] Invalid tariff rate");
                 }
+            } else if (strcmp(commandType, "send_raw") == 0 || strcmp(commandType, "raw") == 0) {
+                JsonArray rawArr = doc["raw"].as<JsonArray>();
+                uint16_t freq = doc["freq"] | 38;
+                uint16_t len = rawArr.size();
+                if (len > 0 && len <= 350) {
+                    uint16_t rawBuf[350];
+                    for (uint16_t i = 0; i < len; i++) {
+                        rawBuf[i] = rawArr[i];
+                    }
+                    digitalWrite(STATUS_LED_PIN, HIGH);
+                    acController.getTransmitter().sendRaw(rawBuf, len, freq);
+                    safetyManager.recordCommandSent(millis());
+                    digitalWrite(STATUS_LED_PIN, LOW);
+                    Serial.printf("[CMD_OK] Transmitted %u raw transitions at %ukHz\n", len, freq);
+                }
             }
             return;
         }
@@ -284,6 +299,12 @@ void loop() {
                     irDoc["ac_temp"] = cap.acState.temperature;
                     irDoc["ac_mode"] = cap.acState.mode;
                     irDoc["ac_fan"] = cap.acState.fanSpeed;
+                }
+                if (cap.rawLength > 0) {
+                    JsonArray rawArr = irDoc["raw"].to<JsonArray>();
+                    for (uint16_t r = 0; r < cap.rawLength; r++) {
+                        rawArr.add(cap.rawData[r]);
+                    }
                 }
                 irDoc["timestamp_ms"] = cap.timestampMs;
                 cloudClient.update(irDoc);

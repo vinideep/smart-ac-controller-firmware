@@ -34,6 +34,8 @@ struct IRCaptureInfo {
     bool isAc = false;
     bool hasAcState = false;
     control::ACState acState;
+    uint16_t rawLength = 0;
+    uint16_t rawData[200] = {0};
     uint32_t timestampMs = 0;
 };
 

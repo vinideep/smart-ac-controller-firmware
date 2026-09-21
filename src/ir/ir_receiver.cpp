@@ -63,6 +63,13 @@ bool IRReceiverDriver::update(const String& deviceId) {
             // Attempt to decode Azure Essence frame from raw timing transitions
             std::unique_ptr<uint16_t[]> rawPtr(resultToRawArray(&_results));
             uint16_t rawLen = getCorrectedRawLength(&_results);
+            _lastCapture.rawLength = (rawLen > 200) ? 200 : rawLen;
+            if (rawPtr) {
+                for (uint16_t i = 0; i < _lastCapture.rawLength; i++) {
+                    _lastCapture.rawData[i] = rawPtr[i];
+                }
+            }
+
             if (rawPtr && rawLen >= 146) {
                 if (AzureEssenceProtocol::decodeRaw(rawPtr.get(), rawLen, _lastCapture.acState)) {
                     _lastCapture.hasAcState = true;
