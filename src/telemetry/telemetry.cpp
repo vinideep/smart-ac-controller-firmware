@@ -112,6 +112,62 @@ void TelemetryManager::printReadingJSON(const DHTReading& reading, const String&
     Serial.println();
 }
 
+void TelemetryManager::printReadingJSON(const DHTReading& reading,
+                                       const ac::control::ACState& acState,
+                                       const ac::automation::AutomationEngine& autoEngine,
+                                       bool isPresent,
+                                       const String& deviceId) {
+    JsonDocument doc;
+
+    if (reading.valid) {
+        float roundedTemp = round(reading.temperature * 10.0f) / 10.0f;
+        float roundedHum = round(reading.humidity * 10.0f) / 10.0f;
+        doc["temperature_c"] = roundedTemp;
+        doc["humidity_percent"] = roundedHum;
+        doc["heat_index_c"] = round(reading.heat_index_c * 10.0f) / 10.0f;
+        doc["dew_point_c"] = round(reading.dew_point_c * 10.0f) / 10.0f;
+        doc["comfort_status"] = reading.comfort_status;
+        doc["mold_risk_score"] = round(reading.mold_risk_score);
+        doc["mold_risk_level"] = reading.mold_risk_level;
+        doc["thermal_rate_c_per_hr"] = round(reading.thermal_rate_c_per_hr * 10.0f) / 10.0f;
+        doc["vpd_kpa"] = round(reading.vpd_kpa * 100.0f) / 100.0f;
+    } else {
+        doc["temperature_c"] = nullptr;
+        doc["humidity_percent"] = nullptr;
+        doc["heat_index_c"] = nullptr;
+        doc["dew_point_c"] = nullptr;
+    }
+
+    doc["sensor_status"] = reading.status;
+    doc["valid"] = reading.valid;
+    if (reading.error_message != nullptr) {
+        doc["error"] = reading.error_message;
+    }
+
+    // AC Digital Twin State
+    doc["power"] = acState.power;
+    doc["temperature"] = acState.temperature;
+    doc["mode"] = acState.mode;
+    doc["fan_speed"] = acState.fanSpeed;
+
+    // Automation & Presence State
+    doc["presence"] = isPresent;
+    doc["presence_tier"] = autoEngine.getPresenceTierStr();
+    doc["sleep_stage"] = autoEngine.getSleepStageStr();
+    doc["sleep_enabled"] = autoEngine.isCircadianSleepEnabled();
+    doc["auto_enabled"] = autoEngine.isEnabled();
+    doc["thermal_breach"] = autoEngine.isThermalBreachActive();
+    doc["thermal_breach_delta"] = autoEngine.getThermalBreachDelta();
+
+    doc["device_id"] = deviceId;
+    doc["timestamp_ms"] = reading.timestamp_ms > 0 ? reading.timestamp_ms : millis();
+    doc["uptime_s"] = millis() / 1000;
+    doc["free_heap"] = ESP.getFreeHeap();
+
+    serializeJson(doc, Serial);
+    Serial.println();
+}
+
 void TelemetryManager::printEnergyJSON(const ac::sensors::EnergyReading& energy, const String& deviceId) {
     JsonDocument doc;
 

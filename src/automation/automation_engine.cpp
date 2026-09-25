@@ -236,22 +236,30 @@ void AutomationEngine::update() {
     bool isPresent = _presence.isPresent();
     uint32_t emptyDuration = isPresent ? 0 : _presence.getDurationSeconds();
     bool acOn = _safety.isAcPowered();
+    bool sleepActive = _config.sleepConfig.enabled;
+    bool effectivePresence = isPresent || sleepActive;
 
     // 2. Update Circadian Sleep Engine
     evaluateCircadianSleep(now);
 
     // 3. Multi-Tier Presence & Micro-Zoning
-    if (isPresent) {
+    if (sleepActive) {
+        // Nocturnal sleep active: occupant is present in bed (motionless); suspend vacant shutdown and eco-drift
+        _presenceTier = PresenceTier::Active;
+        _lastPresenceState = true;
+    } else if (isPresent) {
         if (!_lastPresenceState || _presenceTier == PresenceTier::EcoDrift || _presenceTier == PresenceTier::Vacant) {
             // Welcome-Back Tier: Motion just detected after absence
             _presenceTier = PresenceTier::WelcomeBack;
             _config.targetTemperature = _config.baseTargetTemp;
+            _turnedOffByVacancy = false;
             if (acOn) {
                 uint8_t restored = (uint8_t)round(_config.baseTargetTemp);
                 _ac.setTemperature(restored, "welcome_back");
                 _ac.setFanSpeed("auto", "welcome_back");
+                _safety.recordCommandSent(now);
                 logEvent("welcome_back_motion", "setpoint_restored", currentTemp);
-            } else if (_turnedOffByVacancy && apparentTemp > _config.baseTargetTemp) {
+            } else if (apparentTemp > _config.baseTargetTemp) {
                 const char* reason = nullptr;
                 if (_safety.canTurnOn(now, reason)) {
                     _ac.setTemperature((uint8_t)round(_config.baseTargetTemp), "welcome_back");
@@ -259,7 +267,6 @@ void AutomationEngine::update() {
                     _ac.setFanSpeed("auto", "welcome_back");
                     _ac.setPower(true, "welcome_back");
                     _safety.recordPowerTransition(true, now);
-                    _turnedOffByVacancy = false;
                     acOn = true;
                     logEvent("power_on", "welcome_back_restoration", currentTemp);
                 }
@@ -281,6 +288,7 @@ void AutomationEngine::update() {
                         uint8_t ecoSetpoint = (uint8_t)min((float)31.0f, _config.baseTargetTemp + 1.0f);
                         _ac.setTemperature(ecoSetpoint, "eco_drift");
                         _ac.setFanSpeed("low", "eco_drift");
+                        _safety.recordCommandSent(now);
                         logEvent("eco_drift_engaged", "unoccupied_5min_drift", currentTemp);
                     }
                 }
@@ -304,7 +312,7 @@ void AutomationEngine::update() {
     // 4. Psychrometric Mode Arbitration
     // If humidity is high (>65%) but room temp is mild (21C to 27.5C), switch to DRY (dehumidify)
     if (_config.psychrometricEnabled && currentHum > _config.dryModeHumidityThreshold && currentTemp >= 21.0f && currentTemp <= 27.5f) {
-        if (!acOn && isPresent) {
+        if (!acOn && effectivePresence) {
             const char* reason = nullptr;
             if (_safety.canTurnOn(now, reason)) {
                 _ac.setMode("dry", "psychro_humidity_arbitration");
@@ -316,6 +324,7 @@ void AutomationEngine::update() {
             return;
         } else if (acOn && _ac.getState().mode != "dry") {
             _ac.setMode("dry", "psychro_humidity_arbitration");
+            _safety.recordCommandSent(now);
             logEvent("mode_switched_dry", "high_humidity_threshold_exceeded", currentTemp);
         }
     }
@@ -323,6 +332,7 @@ void AutomationEngine::update() {
     else if (_config.psychrometricEnabled && (apparentTemp > (_config.targetTemperature + _config.hysteresis) || currentTemp > 27.5f)) {
         if (acOn && _ac.getState().mode == "dry") {
             _ac.setMode("cool", "psychro_heat_arbitration");
+            _safety.recordCommandSent(now);
             logEvent("mode_switched_cool", "heat_index_requires_cooling", currentTemp);
         }
     }
@@ -332,12 +342,13 @@ void AutomationEngine::update() {
         uint8_t desiredTemp = (uint8_t)round(_config.targetTemperature);
         if (_ac.getState().temperature != desiredTemp) {
             _ac.setTemperature(desiredTemp, _config.sleepConfig.enabled ? "circadian_ramp" : "target_update");
+            _safety.recordCommandSent(now);
         }
     }
 
     // 5. Standard Closed-Loop Thermal Regulation (Heat-Index or Raw Temp)
     // Rule: Room hotter than target threshold -> turn ON
-    if (!acOn && isPresent && apparentTemp > (_config.targetTemperature + _config.hysteresis)) {
+    if (!acOn && effectivePresence && apparentTemp > (_config.targetTemperature + _config.hysteresis)) {
         const char* reason = nullptr;
         if (_safety.canTurnOn(now, reason)) {
             _ac.setTemperature((uint8_t)round(_config.targetTemperature), "automation_climate");
@@ -350,7 +361,7 @@ void AutomationEngine::update() {
     }
 
     // Rule: Room colder than target threshold -> turn OFF
-    if (acOn && isPresent && apparentTemp < (_config.targetTemperature - _config.hysteresis)) {
+    if (acOn && effectivePresence && apparentTemp < (_config.targetTemperature - _config.hysteresis)) {
         const char* reason = nullptr;
         if (_safety.canTurnOff(now, reason)) {
             _ac.setPower(false, "automation_target_reached");

@@ -42,6 +42,7 @@ private:
     void handleSetPower();
     void handleSetTemperature();
     void handleSetFan();
+    void handleSetMode();
 };
 
 } // namespace ac::api

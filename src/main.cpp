@@ -89,7 +89,7 @@ void setup() {
     Serial.printf("[SYSTEM] Presence/Obstacle sensor active on GPIO %d\n", IR_OBSTACLE_PIN);
     Serial.printf("[SYSTEM] Energy Monitor active (Nominal: %.0fV, Tariff: %.2f/kWh)\n",
                   energyMonitor.getNominalVoltage(), energyMonitor.getTariff());
-    Serial.println("[SYSTEM] Ready. Commands: POWER_ON, POWER_OFF, SET_TEMP <16-31>, SET_FAN <AUTO|MED|HIGH>, AUTO_ON, AUTO_OFF, GET_STATE, GET_PRESENCE, GET_ENERGY, SET_TARIFF <rate>, TEST_TX");
+    Serial.println("[SYSTEM] Ready. Commands: POWER_ON, POWER_OFF, SET_TEMP <16-31>, SET_MODE <COOL|DRY|FAN|AUTO>, SET_FAN <AUTO|MED|HIGH>, AUTO_ON, AUTO_OFF, GET_STATE, GET_PRESENCE, GET_ENERGY, SET_TARIFF <rate>, TEST_TX");
 
     // Visual boot indication (double blink)
     for (int i = 0; i < 2; i++) {
@@ -122,6 +122,13 @@ void processCommand(const String& rawCmd) {
                 uint8_t t = doc["value"] | 25;
                 acController.setTemperature(t, "serial_json");
                 safetyManager.recordCommandSent(millis());
+            } else if (strcmp(commandType, "mode") == 0) {
+                const char* m = doc["value"] | "cool";
+                digitalWrite(STATUS_LED_PIN, HIGH);
+                acController.setMode(String(m), "serial_json");
+                safetyManager.recordCommandSent(millis());
+                digitalWrite(STATUS_LED_PIN, LOW);
+                Serial.printf("[CMD_OK] AC Mode set to %s\n", m);
             } else if (strcmp(commandType, "fan") == 0) {
                 const char* spd = doc["value"] | "auto";
                 acController.setFanSpeed(String(spd), "serial_json");
@@ -145,17 +152,17 @@ void processCommand(const String& rawCmd) {
                 automationEngine.clearThermalBreach();
                 Serial.println("[CMD_OK] Thermal breach alert cleared");
             } else if (strcmp(commandType, "auto_config") == 0) {
-                if (doc["enabled"].is<bool>()) automationEngine.setEnabled(doc["enabled"]);
-                if (doc["target_temp"].is<float>()) automationEngine.setTargetTemperature(doc["target_temp"]);
-                if (doc["hysteresis"].is<float>()) automationEngine.setHysteresis(doc["hysteresis"]);
-                if (doc["empty_timeout_s"].is<uint32_t>()) automationEngine.setEmptyTimeoutSeconds(doc["empty_timeout_s"]);
-                if (doc["eco_drift_timeout_s"].is<uint32_t>()) automationEngine.setEcoDriftTimeoutSeconds(doc["eco_drift_timeout_s"]);
-                if (doc["eco_drift_enabled"].is<bool>()) automationEngine.setEcoDriftEnabled(doc["eco_drift_enabled"]);
-                if (doc["psychrometric_enabled"].is<bool>()) automationEngine.setPsychrometricEnabled(doc["psychrometric_enabled"]);
-                if (doc["dry_mode_humidity_threshold"].is<float>()) automationEngine.setDryModeHumidityThreshold(doc["dry_mode_humidity_threshold"]);
-                if (doc["thermal_breach_protection"].is<bool>()) automationEngine.setThermalBreachProtection(doc["thermal_breach_protection"]);
-                if (doc["sleep_enabled"].is<bool>()) {
-                    automationEngine.setCircadianSleep(doc["sleep_enabled"], doc["pulldown_temp"] | 23, doc["ramp_rate"] | 0.5f, doc["max_temp"] | 25.5f);
+                if (!doc["enabled"].isNull()) automationEngine.setEnabled(doc["enabled"].as<bool>());
+                if (!doc["target_temp"].isNull()) automationEngine.setTargetTemperature(doc["target_temp"].as<float>());
+                if (!doc["hysteresis"].isNull()) automationEngine.setHysteresis(doc["hysteresis"].as<float>());
+                if (!doc["empty_timeout_s"].isNull()) automationEngine.setEmptyTimeoutSeconds(doc["empty_timeout_s"].as<uint32_t>());
+                if (!doc["eco_drift_timeout_s"].isNull()) automationEngine.setEcoDriftTimeoutSeconds(doc["eco_drift_timeout_s"].as<uint32_t>());
+                if (!doc["eco_drift_enabled"].isNull()) automationEngine.setEcoDriftEnabled(doc["eco_drift_enabled"].as<bool>());
+                if (!doc["psychrometric_enabled"].isNull()) automationEngine.setPsychrometricEnabled(doc["psychrometric_enabled"].as<bool>());
+                if (!doc["dry_mode_humidity_threshold"].isNull()) automationEngine.setDryModeHumidityThreshold(doc["dry_mode_humidity_threshold"].as<float>());
+                if (!doc["thermal_breach_protection"].isNull()) automationEngine.setThermalBreachProtection(doc["thermal_breach_protection"].as<bool>());
+                if (!doc["sleep_enabled"].isNull()) {
+                    automationEngine.setCircadianSleep(doc["sleep_enabled"].as<bool>(), doc["pulldown_temp"] | 23, doc["ramp_rate"] | 0.5f, doc["max_temp"] | 25.5f);
                 }
                 Serial.println("[CMD_OK] Automation engine configuration updated");
             } else if (strcmp(commandType, "state") == 0) {
@@ -221,6 +228,23 @@ void processCommand(const String& rawCmd) {
             }
         } else {
             Serial.println("[CMD_ERR] Usage: SET_TEMP <16-31>");
+        }
+    } else if (upper.startsWith("SET_MODE")) {
+        int spaceIdx = upper.indexOf(' ');
+        if (spaceIdx > 0) {
+            String m = upper.substring(spaceIdx + 1);
+            m.toLowerCase();
+            if (m == "cool" || m == "dry" || m == "fan" || m == "auto") {
+                digitalWrite(STATUS_LED_PIN, HIGH);
+                acController.setMode(m, "serial");
+                safetyManager.recordCommandSent(millis());
+                digitalWrite(STATUS_LED_PIN, LOW);
+                Serial.printf("[CMD_OK] AC Mode set to %s\n", m.c_str());
+            } else {
+                Serial.println("[CMD_ERR] Mode must be COOL, DRY, FAN, or AUTO");
+            }
+        } else {
+            Serial.println("[CMD_ERR] Usage: SET_MODE <COOL|DRY|FAN|AUTO>");
         }
     } else if (upper.startsWith("SET_FAN")) {
         int spaceIdx = upper.indexOf(' ');
@@ -336,6 +360,8 @@ void loop() {
             const ac::ir::IRCaptureInfo& cap = irReceiver.getLastCapture();
             if (cap.hasAcState) {
                 acController.applyExternalState(cap.acState);
+                safetyManager.recordPowerTransition(cap.acState.power, millis());
+                safetyManager.recordCommandSent(millis());
                 JsonDocument syncDoc;
                 syncDoc["device_id"] = deviceId;
                 syncDoc["power"] = cap.acState.power;
@@ -493,7 +519,7 @@ void loop() {
         digitalWrite(STATUS_LED_PIN, LOW);
 
         // Emit clean JSON climate & energy telemetry
-        TelemetryManager::printReadingJSON(reading, deviceId);
+        TelemetryManager::printReadingJSON(reading, acController.getState(), automationEngine, HAS_PRESENCE_SENSOR ? presenceSensor.isPresent() : false, deviceId);
         TelemetryManager::printEnergyJSON(energyMonitor.getReading(), deviceId);
     }
 

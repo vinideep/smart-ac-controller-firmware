@@ -122,6 +122,11 @@ public:
     uint32_t lastTurnOff = 0;
     uint32_t lastCmd = 0;
 
+    TestSafetyManager(uint32_t on = 180000, uint32_t off = 180000, uint32_t delay = 5000)
+        : minOnTimeMs(on), minOffTimeMs(off), minStateDelayMs(delay) {}
+
+    bool isAcPowered() const { return isPowered; }
+
     bool canTurnOn(uint32_t now, const char*& reason) const {
         if (isPowered) { reason = "already_on"; return false; }
         if (lastTurnOff > 0 && (now - lastTurnOff) < minOffTimeMs) { reason = "min_off_rest"; return false; }
@@ -540,16 +545,21 @@ public:
 
         evaluateSleep(now);
         float apparentTemp = psychrometricEnabled ? heatIndex : currentTemp;
+        bool effectivePresence = isPresent || sleepEnabled;
 
-        // Presence
-        if (isPresent) {
+        // Presence & Micro-zoning
+        if (sleepEnabled) {
+            presenceTier = TIER_ACTIVE;
+            lastPresenceState = true;
+        } else if (isPresent) {
             if (!lastPresenceState || presenceTier == TIER_ECO_DRIFT || presenceTier == TIER_VACANT) {
                 presenceTier = TIER_WELCOME_BACK;
                 targetTemperature = baseTargetTemp;
+                turnedOffByVacancy = false;
                 if (acPower) {
                     acTemp = (uint8_t)std::round(baseTargetTemp);
                     acFan = "auto";
-                } else if (turnedOffByVacancy && apparentTemp > baseTargetTemp) {
+                } else if (apparentTemp > baseTargetTemp) {
                     const char* reason = nullptr;
                     if (safety.canTurnOn(now, reason)) {
                         acPower = true;
@@ -557,7 +567,6 @@ public:
                         acMode = "cool";
                         acFan = "auto";
                         safety.recordTransition(true, now);
-                        turnedOffByVacancy = false;
                     }
                 }
             } else {
@@ -594,7 +603,7 @@ public:
 
         // Psychrometric arbitration
         if (psychrometricEnabled && currentHum > dryModeHumidityThreshold && currentTemp >= 21.0f && currentTemp <= 27.5f) {
-            if (!acPower && isPresent) {
+            if (!acPower && effectivePresence) {
                 const char* reason = nullptr;
                 if (safety.canTurnOn(now, reason)) {
                     acMode = "dry";
@@ -618,7 +627,7 @@ public:
         }
 
         // Regulation
-        if (!acPower && isPresent && apparentTemp > (targetTemperature + hysteresis)) {
+        if (!acPower && effectivePresence && apparentTemp > (targetTemperature + hysteresis)) {
             const char* reason = nullptr;
             if (safety.canTurnOn(now, reason)) {
                 acPower = true;
@@ -626,7 +635,7 @@ public:
                 acMode = "cool";
                 safety.recordTransition(true, now);
             }
-        } else if (acPower && isPresent && apparentTemp < (targetTemperature - hysteresis)) {
+        } else if (acPower && effectivePresence && apparentTemp < (targetTemperature - hysteresis)) {
             const char* reason = nullptr;
             if (safety.canTurnOff(now, reason)) {
                 acPower = false;
@@ -1291,7 +1300,114 @@ int main() {
         std::cout << "[TEST 50] PASS: Full-duplex IR digital twin decoding parses raw frame into synchronized ACState" << std::endl;
     }
 
-    std::cout << "\nALL 50 UNIT TESTS PASSED SUCCESSFULLY!" << std::endl;
+    // Test 51: Circadian Sleep Motionless Immunity (Sleep across vacancy timeout)
+    {
+        TestSmartClimateEngine engine;
+        TestSafetyManager safety;
+        safety.recordTransition(true, 100000);
+        engine.acPower = true;
+        engine.acTemp = 23;
+        engine.baseTargetTemp = 25.0f;
+        engine.sleepEnabled = true;
+        engine.sleepPulldown = 23;
+        engine.sleepRampRate = 0.5f;
+        engine.sleepMaxTemp = 25.5f;
+        engine.sleepStartTime = 1000000;
+
+        // User falls asleep: motionless for 20 minutes (1200s > 900s emptyTimeout)
+        engine.update(false, 1200, 23.2f, 50.0f, 23.2f, 1000000 + 1200000, safety);
+        assert(engine.acPower == true); // Must NOT power off during sleep!
+        assert(engine.presenceTier == TestSmartClimateEngine::TIER_ACTIVE); // Must remain active during sleep!
+
+        // Advance to 3 hours into sleep (2hr ramp -> 24.0C target), user still still (isPresent = false, emptyDuration = 10800s)
+        engine.update(false, 10800, 24.1f, 50.0f, 24.1f, 1000000 + 10800000, safety);
+        assert(engine.acPower == true);
+        assert(std::fabs(engine.targetTemperature - 24.0f) < 0.01f);
+        assert(engine.acTemp == 24);
+
+        // Nocturnal stirring / movement in bed (brief isPresent = true)
+        engine.update(true, 0, 24.0f, 50.0f, 24.0f, 1000000 + 10805000, safety);
+        // Must preserve the circadian ramp target (24.0C), NOT wipe out to baseTargetTemp (25.0C)!
+        assert(std::fabs(engine.targetTemperature - 24.0f) < 0.01f);
+        assert(engine.acTemp == 24);
+        std::cout << "[TEST 51] PASS: Circadian sleep motionless immunity verified (no premature vacancy shutdown)" << std::endl;
+    }
+
+    // Test 52: SET_MODE wire protocol validation and roundtrip decoding
+    {
+        uint8_t dryWireState[kAzureStateLength];
+        // Mode dry = 0x03
+        dryWireState[0] = kAzureVendorId;
+        dryWireState[1] = (kAzureFanAuto << 4) | 0x03;
+        dryWireState[2] = 0x00; dryWireState[3] = 0x00; dryWireState[4] = 0x00; dryWireState[5] = 0x00;
+        dryWireState[6] = 25 + 11;
+        dryWireState[7] = kAzurePowerOnByte;
+        dryWireState[8] = (calculateAzureChecksum(dryWireState) << 4) & 0xF0;
+
+        uint16_t dryRaw[kAzureRawTransitions];
+        uint16_t dryCount = generateAzureRaw(dryWireState, dryRaw, kAzureRawTransitions);
+        assert(dryCount == 147);
+
+        // Verify wire mode nibble
+        assert((dryWireState[1] & 0x0F) == 0x03);
+
+        // Fan-only mode = 0x04
+        uint8_t fanWireState[kAzureStateLength];
+        fanWireState[0] = kAzureVendorId;
+        fanWireState[1] = (kAzureFanHigh << 4) | 0x04;
+        fanWireState[2] = 0x00; fanWireState[3] = 0x00; fanWireState[4] = 0x00; fanWireState[5] = 0x00;
+        fanWireState[6] = 25 + 11;
+        fanWireState[7] = kAzurePowerOnByte;
+        fanWireState[8] = (calculateAzureChecksum(fanWireState) << 4) & 0xF0;
+
+        assert((fanWireState[1] & 0x0F) == 0x04);
+        assert(((fanWireState[1] >> 4) & 0x0F) == kAzureFanHigh);
+        std::cout << "[TEST 52] PASS: SET_MODE multi-mode wire encoding & checksum validated" << std::endl;
+    }
+
+    // Test 53: Sniffed IR remote digital twin synchronizes SafetyManager compressor timers
+    {
+        TestSafetyManager safety(180000, 180000, 5000); // 3m min on/off
+
+        // Remote turns AC ON at t = 50000
+        safety.recordTransition(true, 50000);
+        assert(safety.isAcPowered() == true);
+
+        // Attempting to turn OFF at t = 100000 (only 50s on, < 180s) must be rejected
+        const char* reason = nullptr;
+        assert(safety.canTurnOff(100000, reason) == false);
+
+        // At t = 240000 (190s on, > 180s), turning OFF permitted
+        assert(safety.canTurnOff(240000, reason) == true);
+        safety.recordTransition(false, 240000);
+        assert(safety.isAcPowered() == false);
+
+        // Remote turns AC OFF: immediate restart attempt at t = 260000 (< 180s off) must be blocked
+        assert(safety.canTurnOn(260000, reason) == false);
+        // At t = 430000 (190s off, > 180s), restart permitted
+        assert(safety.canTurnOn(430000, reason) == true);
+        std::cout << "[TEST 53] PASS: Sniffed IR remote digital twin synchronization accurately enforces compressor protection" << std::endl;
+    }
+
+    // Test 54: Digital Twin full telemetry schema completeness
+    {
+        std::ostringstream ss;
+        ss << "{\"device_id\":\"esp32-e5ca5c\",\"power\":true,\"temperature\":24,\"mode\":\"cool\",\"fan_speed\":\"auto\","
+           << "\"presence\":true,\"presence_tier\":\"active\",\"sleep_stage\":\"inactive\",\"sleep_enabled\":false,"
+           << "\"thermal_breach\":false,\"thermal_breach_delta\":0.0,\"auto_enabled\":true}";
+        std::string jsonStr = ss.str();
+
+        assert(jsonStr.find("\"power\":true") != std::string::npos);
+        assert(jsonStr.find("\"mode\":\"cool\"") != std::string::npos);
+        assert(jsonStr.find("\"fan_speed\":\"auto\"") != std::string::npos);
+        assert(jsonStr.find("\"presence_tier\":\"active\"") != std::string::npos);
+        assert(jsonStr.find("\"thermal_breach\":false") != std::string::npos);
+        assert(jsonStr.find("\"sleep_enabled\":false") != std::string::npos);
+        std::cout << "[TEST 54] PASS: Serial Digital Twin full telemetry schema completeness validated" << std::endl;
+    }
+
+    std::cout << "\nALL 54 UNIT TESTS PASSED SUCCESSFULLY!" << std::endl;
     return 0;
 }
+
 

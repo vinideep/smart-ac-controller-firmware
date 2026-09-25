@@ -51,6 +51,7 @@ void LocalAPIServer::setupRoutes() {
     _server.on("/api/ac/power", HTTP_POST, [this]() { handleSetPower(); });
     _server.on("/api/ac/temp", HTTP_POST, [this]() { handleSetTemperature(); });
     _server.on("/api/ac/fan", HTTP_POST, [this]() { handleSetFan(); });
+    _server.on("/api/ac/mode", HTTP_POST, [this]() { handleSetMode(); });
 }
 
 void LocalAPIServer::handleRoot() {
@@ -299,6 +300,25 @@ void LocalAPIServer::handleSetFan() {
         _server.send(200, "application/json", _ac.getState().toJSONString());
     } else {
         _server.send(400, "application/json", "{\"error\":\"Invalid fan speed\"}");
+    }
+}
+
+void LocalAPIServer::handleSetMode() {
+    sendCORS();
+    if (!_server.hasArg("plain")) {
+        _server.send(400, "application/json", "{\"error\":\"Missing body\"}");
+        return;
+    }
+    JsonDocument doc;
+    deserializeJson(doc, _server.arg("plain"));
+    const char* m = doc["mode"] | "cool";
+
+    bool ok = _ac.setMode(String(m), "rest_api");
+    _safety.recordCommandSent(millis());
+    if (ok) {
+        _server.send(200, "application/json", _ac.getState().toJSONString());
+    } else {
+        _server.send(400, "application/json", "{\"error\":\"Invalid mode (cool, dry, fan, auto)\"}");
     }
 }
 
