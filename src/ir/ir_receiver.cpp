@@ -49,7 +49,6 @@ bool IRReceiverDriver::update(const String& deviceId) {
             _captureCount++;
 
             digitalWrite(STATUS_LED_PIN, HIGH);
-            printStructuredOutput(_results, deviceId);
 
             _lastCapture.hasData = true;
             _lastCapture.protocol = typeToString(_results.decode_type, _results.repeat);
@@ -82,6 +81,55 @@ bool IRReceiverDriver::update(const String& deviceId) {
                                   _lastCapture.acState.fanSpeed.c_str());
                 }
             }
+
+            // Universal AC remote decoding fallback for all supported brands (Gree, Daikin, Midea, etc.)
+            if (!_lastCapture.hasAcState && hasACState(_results.decode_type)) {
+                stdAc::state_t stdState;
+                if (IRAcUtils::decodeToState(&_results, &stdState)) {
+                    _lastCapture.hasAcState = true;
+                    _lastCapture.isAc = true;
+                    _lastCapture.acState.power = stdState.power;
+                    _lastCapture.acState.temperature = (uint8_t)round(stdState.degrees);
+                    if (_lastCapture.acState.temperature < 16) _lastCapture.acState.temperature = 16;
+                    if (_lastCapture.acState.temperature > 31) _lastCapture.acState.temperature = 31;
+
+                    switch (stdState.mode) {
+                        case stdAc::opmode_t::kCool: _lastCapture.acState.mode = "cool"; break;
+                        case stdAc::opmode_t::kHeat: _lastCapture.acState.mode = "heat"; break;
+                        case stdAc::opmode_t::kDry:  _lastCapture.acState.mode = "dry"; break;
+                        case stdAc::opmode_t::kFan:  _lastCapture.acState.mode = "fan"; break;
+                        case stdAc::opmode_t::kAuto: _lastCapture.acState.mode = "auto"; break;
+                        default: _lastCapture.acState.mode = "cool"; break;
+                    }
+
+                    switch (stdState.fanspeed) {
+                        case stdAc::fanspeed_t::kLow:
+                        case stdAc::fanspeed_t::kMin:
+                            _lastCapture.acState.fanSpeed = "low"; break;
+                        case stdAc::fanspeed_t::kMedium:
+                            _lastCapture.acState.fanSpeed = "med"; break;
+                        case stdAc::fanspeed_t::kHigh:
+                        case stdAc::fanspeed_t::kMax:
+                            _lastCapture.acState.fanSpeed = "high"; break;
+                        default:
+                            _lastCapture.acState.fanSpeed = "auto"; break;
+                    }
+
+                    _lastCapture.acState.swing = (stdState.swingv != stdAc::swingv_t::kOff || stdState.swingh != stdAc::swingh_t::kOff);
+                    _lastCapture.acState.sleep = (stdState.sleep >= 0);
+                    _lastCapture.acState.source = "ir_remote";
+                    _lastCapture.acState.timestamp = millis();
+
+                    Serial.printf("[IR_MIRROR] Universal AC State Decoded (%s): Power=%s Temp=%dC Mode=%s Fan=%s\n",
+                                  _lastCapture.protocol.c_str(),
+                                  _lastCapture.acState.power ? "ON" : "OFF",
+                                  _lastCapture.acState.temperature,
+                                  _lastCapture.acState.mode.c_str(),
+                                  _lastCapture.acState.fanSpeed.c_str());
+                }
+            }
+
+            printStructuredOutput(_results, deviceId);
 
             digitalWrite(STATUS_LED_PIN, LOW);
             _irrecv.resume();

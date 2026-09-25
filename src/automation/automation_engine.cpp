@@ -1,4 +1,5 @@
 #include "automation_engine.h"
+#include <math.h>
 
 namespace ac::automation {
 
@@ -10,6 +11,10 @@ AutomationEngine::AutomationEngine(control::ACController& ac,
 
 void AutomationEngine::begin() {
     _lastEvalTime = millis();
+    _lastBreachSampleTime = millis();
+    _breachBufCount = 0;
+    _breachBufHead = 0;
+    _turnedOffByVacancy = false;
 }
 
 void AutomationEngine::setEnabled(bool enable) {
@@ -20,6 +25,7 @@ void AutomationEngine::setEnabled(bool enable) {
 void AutomationEngine::setTargetTemperature(float target) {
     if (target >= 16.0f && target <= 31.0f) {
         _config.targetTemperature = target;
+        _config.baseTargetTemp = target;
     }
 }
 
@@ -33,50 +39,318 @@ void AutomationEngine::setEmptyTimeoutSeconds(uint32_t seconds) {
     _config.emptyTimeoutSeconds = seconds;
 }
 
+void AutomationEngine::setEcoDriftEnabled(bool enable) {
+    _config.ecoDriftEnabled = enable;
+}
+
+void AutomationEngine::setEcoDriftTimeoutSeconds(uint32_t seconds) {
+    _config.ecoDriftTimeoutSeconds = seconds;
+}
+
+void AutomationEngine::setPsychrometricEnabled(bool enable) {
+    _config.psychrometricEnabled = enable;
+}
+
+void AutomationEngine::setDryModeHumidityThreshold(float threshold) {
+    if (threshold >= 40.0f && threshold <= 90.0f) {
+        _config.dryModeHumidityThreshold = threshold;
+    }
+}
+
+void AutomationEngine::setThermalBreachProtection(bool enable) {
+    _config.thermalBreachProtection = enable;
+}
+
+void AutomationEngine::setCircadianSleep(bool enable, uint8_t pulldown, float ramp, float maxTemp) {
+    _config.sleepConfig.enabled = enable;
+    if (enable) {
+        _config.sleepConfig.pulldownTemp = (pulldown >= 18 && pulldown <= 28) ? pulldown : 23;
+        _config.sleepConfig.rampRatePerHr = (ramp >= 0.1f && ramp <= 2.0f) ? ramp : 0.5f;
+        _config.sleepConfig.maxRampTemp = (maxTemp >= 20.0f && maxTemp <= 30.0f) ? maxTemp : 25.5f;
+        _config.sleepConfig.sleepStartTimeMs = millis();
+        _sleepStage = SleepStage::Pulldown;
+        _config.targetTemperature = _config.sleepConfig.pulldownTemp;
+        logEvent("sleep_schedule_started", "circadian_init", _dht.getLatestReading().temperature_c);
+    } else {
+        _sleepStage = SleepStage::Inactive;
+        _config.targetTemperature = _config.baseTargetTemp;
+        logEvent("sleep_schedule_cancelled", "user_toggle", _dht.getLatestReading().temperature_c);
+    }
+}
+
+const char* AutomationEngine::getSleepStageStr() const {
+    switch (_sleepStage) {
+        case SleepStage::Pulldown: return "pulldown";
+        case SleepStage::DeepSleepRamp: return "deep_sleep_ramp";
+        case SleepStage::RemHold: return "rem_hold";
+        case SleepStage::Wakeup: return "wakeup";
+        case SleepStage::Inactive:
+        default: return "inactive";
+    }
+}
+
+const char* AutomationEngine::getPresenceTierStr() const {
+    switch (_presenceTier) {
+        case PresenceTier::EcoDrift: return "eco_drift";
+        case PresenceTier::Vacant: return "vacant";
+        case PresenceTier::WelcomeBack: return "welcome_back";
+        case PresenceTier::Active:
+        default: return "active";
+    }
+}
+
+void AutomationEngine::recordBreachSample(float temp, uint32_t now) {
+    if (now - _lastBreachSampleTime < 10000) {
+        return; // Sample every 10 seconds
+    }
+    _lastBreachSampleTime = now;
+
+    _breachBuffer[_breachBufHead].temp = temp;
+    _breachBuffer[_breachBufHead].timeMs = now;
+    _breachBufHead = (_breachBufHead + 1) % kBreachBufferSize;
+    if (_breachBufCount < kBreachBufferSize) {
+        _breachBufCount++;
+    }
+}
+
+void AutomationEngine::evaluateThermalBreach(float currentTemp, uint32_t now, bool acOn) {
+    if (!_config.thermalBreachProtection) {
+        if (_thermalBreachActive) {
+            _thermalBreachActive = false;
+            _thermalBreachDelta = 0.0f;
+        }
+        return;
+    }
+
+    if (_breachBufCount < 4) return; // Need at least 4 samples (40s)
+
+    bool cooling = acOn && (_ac.getState().mode == "cool");
+    if (!cooling) {
+        if (_thermalBreachActive) {
+            _thermalBreachActive = false;
+            _thermalBreachDelta = 0.0f;
+        }
+        return;
+    }
+
+    // Look for baseline sample within the 3-minute window (20s to 180s)
+    float maxRise = 0.0f;
+    bool foundInWindow = false;
+    for (size_t i = 0; i < _breachBufCount; i++) {
+        size_t idx = (_breachBufHead + kBreachBufferSize - 1 - i) % kBreachBufferSize;
+        uint32_t ageMs = now - _breachBuffer[idx].timeMs;
+        if (ageMs >= 20000 && ageMs <= _config.breachWindowMs) {
+            foundInWindow = true;
+            float rise = currentTemp - _breachBuffer[idx].temp;
+            if (rise > maxRise) {
+                maxRise = rise;
+            }
+        }
+    }
+
+    if (!foundInWindow) return;
+
+    if (maxRise >= _config.breachRiseThreshold) {
+        if (!_thermalBreachActive) {
+            _thermalBreachActive = true;
+            _thermalBreachDelta = maxRise;
+            logEvent("thermal_breach_detected", "temp_rose_gt_1_2c_in_3m", currentTemp);
+
+            // Thermal leak mitigation: boost blower to compensate
+            if (_ac.getState().fanSpeed != "high") {
+                _ac.setFanSpeed("high", "breach_mitigation");
+            }
+        } else {
+            _thermalBreachDelta = maxRise;
+        }
+    } else if (_thermalBreachActive && maxRise < 0.3f) {
+        // Cooled down back to normal trend
+        _thermalBreachActive = false;
+        _thermalBreachDelta = 0.0f;
+        logEvent("thermal_breach_resolved", "thermal_trend_stabilized", currentTemp);
+    }
+}
+
+void AutomationEngine::evaluateCircadianSleep(uint32_t now) {
+    if (!_config.sleepConfig.enabled) return;
+
+    uint32_t elapsedMs = now - _config.sleepConfig.sleepStartTimeMs;
+
+    // Stage 1: Bedtime Pulldown (0 - 60 min)
+    if (elapsedMs < 3600000) {
+        _sleepStage = SleepStage::Pulldown;
+        _config.targetTemperature = _config.sleepConfig.pulldownTemp;
+    }
+    // Stage 2: Deep Sleep Gradual Ramp (1 hr - 6 hrs = 3,600,000 to 21,600,000 ms)
+    else if (elapsedMs < 21600000) {
+        _sleepStage = SleepStage::DeepSleepRamp;
+        float hoursInRamp = (elapsedMs - 3600000) / 3600000.0f;
+        float ramped = _config.sleepConfig.pulldownTemp + (hoursInRamp * _config.sleepConfig.rampRatePerHr);
+        if (ramped > _config.sleepConfig.maxRampTemp) ramped = _config.sleepConfig.maxRampTemp;
+        _config.targetTemperature = ramped;
+    }
+    // Stage 3: REM Hold (6 hrs - 8 hrs = 21,600,000 to 28,800,000 ms)
+    else if (elapsedMs < 28800000) {
+        _sleepStage = SleepStage::RemHold;
+        _config.targetTemperature = _config.sleepConfig.maxRampTemp;
+    }
+    // Stage 4: Wakeup (> 8 hrs)
+    else {
+        _sleepStage = SleepStage::Wakeup;
+        const char* reason = nullptr;
+        if (_safety.canTurnOff(now, reason)) {
+            _ac.setPower(false, "circadian_wakeup_complete");
+            _safety.recordPowerTransition(false, now);
+            _config.sleepConfig.enabled = false;
+            _sleepStage = SleepStage::Inactive;
+            _config.targetTemperature = _config.baseTargetTemp;
+            logEvent("circadian_sleep_ended", "full_night_schedule_completed", _dht.getLatestReading().temperature_c);
+        }
+    }
+}
+
 void AutomationEngine::update() {
+    uint32_t now = millis();
+
+    // 1. Maintain thermal breach tracking samples regardless of automation master toggle
+    const DHTReading& reading = _dht.getLatestReading();
+    if (reading.valid && !reading.isStale(10000)) {
+        recordBreachSample(reading.temperature_c, now);
+        evaluateThermalBreach(reading.temperature_c, now, _safety.isAcPowered());
+    }
+
     if (!_config.enabled) return;
 
-    uint32_t now = millis();
     if (now - _lastEvalTime < _config.evalIntervalMs) {
         return;
     }
     _lastEvalTime = now;
 
-    const DHTReading& reading = _dht.getLatestReading();
     if (!reading.valid || reading.isStale(10000)) {
-        return; // Don't make automation decisions on stale or invalid sensor data
+        return; // Don't act on stale or invalid readings
     }
 
     float currentTemp = reading.temperature_c;
+    float currentHum = reading.humidity_percent;
+    float apparentTemp = _config.psychrometricEnabled ? reading.heat_index_c : currentTemp;
     bool isPresent = _presence.isPresent();
     uint32_t emptyDuration = isPresent ? 0 : _presence.getDurationSeconds();
     bool acOn = _safety.isAcPowered();
 
-    // Rule 1: Empty room safety turn-off
-    if (acOn && !isPresent && emptyDuration >= _config.emptyTimeoutSeconds) {
-        const char* reason = nullptr;
-        if (_safety.canTurnOff(now, reason)) {
-            _ac.setPower(false, "automation_empty_room");
-            _safety.recordPowerTransition(false, now);
-            logEvent("power_off", "empty_room_timeout", currentTemp);
+    // 2. Update Circadian Sleep Engine
+    evaluateCircadianSleep(now);
+
+    // 3. Multi-Tier Presence & Micro-Zoning
+    if (isPresent) {
+        if (!_lastPresenceState || _presenceTier == PresenceTier::EcoDrift || _presenceTier == PresenceTier::Vacant) {
+            // Welcome-Back Tier: Motion just detected after absence
+            _presenceTier = PresenceTier::WelcomeBack;
+            _config.targetTemperature = _config.baseTargetTemp;
+            if (acOn) {
+                uint8_t restored = (uint8_t)round(_config.baseTargetTemp);
+                _ac.setTemperature(restored, "welcome_back");
+                _ac.setFanSpeed("auto", "welcome_back");
+                logEvent("welcome_back_motion", "setpoint_restored", currentTemp);
+            } else if (_turnedOffByVacancy && apparentTemp > _config.baseTargetTemp) {
+                const char* reason = nullptr;
+                if (_safety.canTurnOn(now, reason)) {
+                    _ac.setTemperature((uint8_t)round(_config.baseTargetTemp), "welcome_back");
+                    _ac.setMode("cool", "welcome_back");
+                    _ac.setFanSpeed("auto", "welcome_back");
+                    _ac.setPower(true, "welcome_back");
+                    _safety.recordPowerTransition(true, now);
+                    _turnedOffByVacancy = false;
+                    acOn = true;
+                    logEvent("power_on", "welcome_back_restoration", currentTemp);
+                }
+            }
+        } else {
+            _presenceTier = PresenceTier::Active;
         }
-        return;
+        _lastPresenceState = true;
+    } else {
+        _lastPresenceState = false;
+        if (emptyDuration < _config.ecoDriftTimeoutSeconds) {
+            _presenceTier = PresenceTier::Active;
+        } else if (emptyDuration < _config.emptyTimeoutSeconds) {
+            // Eco-Drift Tier: 5 to 15 minutes unoccupied
+            if (_config.ecoDriftEnabled) {
+                if (_presenceTier != PresenceTier::EcoDrift) {
+                    _presenceTier = PresenceTier::EcoDrift;
+                    if (acOn) {
+                        uint8_t ecoSetpoint = (uint8_t)min((float)31.0f, _config.baseTargetTemp + 1.0f);
+                        _ac.setTemperature(ecoSetpoint, "eco_drift");
+                        _ac.setFanSpeed("low", "eco_drift");
+                        logEvent("eco_drift_engaged", "unoccupied_5min_drift", currentTemp);
+                    }
+                }
+            }
+        } else {
+            // Vacant Tier: > 15 minutes unoccupied -> Safe Graceful Shutdown
+            _presenceTier = PresenceTier::Vacant;
+            if (acOn) {
+                const char* reason = nullptr;
+                if (_safety.canTurnOff(now, reason)) {
+                    _ac.setPower(false, "automation_vacant_timeout");
+                    _safety.recordPowerTransition(false, now);
+                    _turnedOffByVacancy = true;
+                    logEvent("power_off", "vacant_room_timeout", currentTemp);
+                }
+                return;
+            }
+        }
     }
 
-    // Rule 2: Occupied room cooling trigger
-    if (!acOn && isPresent && currentTemp > (_config.targetTemperature + _config.hysteresis)) {
+    // 4. Psychrometric Mode Arbitration
+    // If humidity is high (>65%) but room temp is mild (21C to 27.5C), switch to DRY (dehumidify)
+    if (_config.psychrometricEnabled && currentHum > _config.dryModeHumidityThreshold && currentTemp >= 21.0f && currentTemp <= 27.5f) {
+        if (!acOn && isPresent) {
+            const char* reason = nullptr;
+            if (_safety.canTurnOn(now, reason)) {
+                _ac.setMode("dry", "psychro_humidity_arbitration");
+                _ac.setPower(true, "psychro_humidity_arbitration");
+                _safety.recordPowerTransition(true, now);
+                acOn = true;
+                logEvent("power_on", "high_humidity_dehumidify_mode", currentTemp);
+            }
+            return;
+        } else if (acOn && _ac.getState().mode != "dry") {
+            _ac.setMode("dry", "psychro_humidity_arbitration");
+            logEvent("mode_switched_dry", "high_humidity_threshold_exceeded", currentTemp);
+        }
+    }
+    // Switch back to COOL if heat index is high or temp is warm
+    else if (_config.psychrometricEnabled && (apparentTemp > (_config.targetTemperature + _config.hysteresis) || currentTemp > 27.5f)) {
+        if (acOn && _ac.getState().mode == "dry") {
+            _ac.setMode("cool", "psychro_heat_arbitration");
+            logEvent("mode_switched_cool", "heat_index_requires_cooling", currentTemp);
+        }
+    }
+
+    // Dynamic setpoint tracking (Circadian sleep ramp / Target update while running)
+    if (acOn && _presenceTier != PresenceTier::EcoDrift) {
+        uint8_t desiredTemp = (uint8_t)round(_config.targetTemperature);
+        if (_ac.getState().temperature != desiredTemp) {
+            _ac.setTemperature(desiredTemp, _config.sleepConfig.enabled ? "circadian_ramp" : "target_update");
+        }
+    }
+
+    // 5. Standard Closed-Loop Thermal Regulation (Heat-Index or Raw Temp)
+    // Rule: Room hotter than target threshold -> turn ON
+    if (!acOn && isPresent && apparentTemp > (_config.targetTemperature + _config.hysteresis)) {
         const char* reason = nullptr;
         if (_safety.canTurnOn(now, reason)) {
             _ac.setTemperature((uint8_t)round(_config.targetTemperature), "automation_climate");
+            _ac.setMode("cool", "automation_climate");
             _ac.setPower(true, "automation_climate");
             _safety.recordPowerTransition(true, now);
-            logEvent("power_on", "temp_above_target_threshold", currentTemp);
+            logEvent("power_on", "heat_index_above_threshold", currentTemp);
         }
         return;
     }
 
-    // Rule 3: Target reached in cooling mode
-    if (acOn && isPresent && currentTemp < (_config.targetTemperature - _config.hysteresis)) {
+    // Rule: Room colder than target threshold -> turn OFF
+    if (acOn && isPresent && apparentTemp < (_config.targetTemperature - _config.hysteresis)) {
         const char* reason = nullptr;
         if (_safety.canTurnOff(now, reason)) {
             _ac.setPower(false, "automation_target_reached");
@@ -94,6 +368,9 @@ void AutomationEngine::logEvent(const char* action, const char* reason, float cu
     doc["current_temp"] = currentTemp;
     doc["target_temp"] = _config.targetTemperature;
     doc["hysteresis"] = _config.hysteresis;
+    doc["presence_tier"] = getPresenceTierStr();
+    doc["sleep_stage"] = getSleepStageStr();
+    doc["thermal_breach"] = _thermalBreachActive;
     doc["timestamp_ms"] = millis();
 
     String out;
@@ -104,8 +381,19 @@ void AutomationEngine::logEvent(const char* action, const char* reason, float cu
 void AutomationEngine::toJSON(JsonDocument& doc) const {
     doc["enabled"] = _config.enabled;
     doc["target_temp"] = _config.targetTemperature;
+    doc["base_target_temp"] = _config.baseTargetTemp;
     doc["hysteresis"] = _config.hysteresis;
     doc["empty_timeout_s"] = _config.emptyTimeoutSeconds;
+    doc["eco_drift_enabled"] = _config.ecoDriftEnabled;
+    doc["eco_drift_timeout_s"] = _config.ecoDriftTimeoutSeconds;
+    doc["psychrometric_enabled"] = _config.psychrometricEnabled;
+    doc["dry_mode_humidity_threshold"] = _config.dryModeHumidityThreshold;
+    doc["thermal_breach_protection"] = _config.thermalBreachProtection;
+    doc["thermal_breach"] = _thermalBreachActive;
+    doc["thermal_breach_delta"] = _thermalBreachDelta;
+    doc["presence_tier"] = getPresenceTierStr();
+    doc["sleep_stage"] = getSleepStageStr();
+    doc["sleep_enabled"] = _config.sleepConfig.enabled;
 }
 
 } // namespace ac::automation

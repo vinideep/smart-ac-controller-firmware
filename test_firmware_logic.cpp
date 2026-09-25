@@ -422,6 +422,220 @@ public:
     }
 };
 
+// Host simulation of Smart AC Climate Stack (Psychrometric, Sleep, Presence Tiers, Thermal Breach)
+class TestSmartClimateEngine {
+public:
+    enum PresenceTier { TIER_ACTIVE, TIER_ECO_DRIFT, TIER_VACANT, TIER_WELCOME_BACK };
+    enum SleepStage { SLEEP_INACTIVE, SLEEP_PULLDOWN, SLEEP_DEEP_RAMP, SLEEP_REM_HOLD, SLEEP_WAKEUP };
+
+    bool enabled = true;
+    float targetTemperature = 25.0f;
+    float baseTargetTemp = 25.0f;
+    float hysteresis = 1.0f;
+    uint32_t ecoDriftTimeoutSeconds = 300;
+    uint32_t emptyTimeoutSeconds = 900;
+    bool ecoDriftEnabled = true;
+    bool psychrometricEnabled = true;
+    float dryModeHumidityThreshold = 65.0f;
+    bool thermalBreachProtection = true;
+    float breachRiseThreshold = 1.2f;
+    uint32_t breachWindowMs = 180000;
+
+    // Sleep config
+    bool sleepEnabled = false;
+    uint8_t sleepPulldown = 23;
+    float sleepRampRate = 0.5f;
+    float sleepMaxTemp = 25.5f;
+    uint32_t sleepStartTime = 0;
+    SleepStage sleepStage = SLEEP_INACTIVE;
+
+    // Presence state
+    PresenceTier presenceTier = TIER_ACTIVE;
+    bool lastPresenceState = true;
+    bool turnedOffByVacancy = false;
+
+    // Thermal breach state
+    bool thermalBreachActive = false;
+    float thermalBreachDelta = 0.0f;
+    struct Sample { float temp; uint32_t timeMs; };
+    std::vector<Sample> breachBuffer;
+
+    // AC state
+    bool acPower = false;
+    uint8_t acTemp = 25;
+    std::string acMode = "cool";
+    std::string acFan = "auto";
+
+    void clearBreach() {
+        thermalBreachActive = false;
+        thermalBreachDelta = 0.0f;
+        breachBuffer.clear();
+    }
+
+    void recordBreachSample(float temp, uint32_t now) {
+        breachBuffer.push_back({temp, now});
+        if (breachBuffer.size() > 24) breachBuffer.erase(breachBuffer.begin());
+    }
+
+    void evaluateBreach(float currentTemp, uint32_t now) {
+        if (!thermalBreachProtection) {
+            thermalBreachActive = false;
+            thermalBreachDelta = 0.0f;
+            return;
+        }
+        if (breachBuffer.size() < 4 || !acPower || acMode != "cool") return;
+        float maxRise = 0.0f;
+        bool found = false;
+        for (const auto& s : breachBuffer) {
+            uint32_t age = now - s.timeMs;
+            if (age >= 20000 && age <= breachWindowMs) {
+                found = true;
+                float r = currentTemp - s.temp;
+                if (r > maxRise) maxRise = r;
+            }
+        }
+        if (!found) return;
+        if (maxRise >= breachRiseThreshold) {
+            if (!thermalBreachActive) {
+                thermalBreachActive = true;
+                thermalBreachDelta = maxRise;
+                acFan = "high"; // leak mitigation
+            } else {
+                thermalBreachDelta = maxRise;
+            }
+        } else if (thermalBreachActive && maxRise < 0.3f) {
+            thermalBreachActive = false;
+            thermalBreachDelta = 0.0f;
+        }
+    }
+
+    void evaluateSleep(uint32_t now) {
+        if (!sleepEnabled) return;
+        uint32_t elapsed = now - sleepStartTime;
+        if (elapsed < 3600000) {
+            sleepStage = SLEEP_PULLDOWN;
+            targetTemperature = sleepPulldown;
+        } else if (elapsed < 21600000) {
+            sleepStage = SLEEP_DEEP_RAMP;
+            float hrs = (elapsed - 3600000) / 3600000.0f;
+            float r = sleepPulldown + hrs * sleepRampRate;
+            if (r > sleepMaxTemp) r = sleepMaxTemp;
+            targetTemperature = r;
+        } else if (elapsed < 28800000) {
+            sleepStage = SLEEP_REM_HOLD;
+            targetTemperature = sleepMaxTemp;
+        } else {
+            sleepStage = SLEEP_WAKEUP;
+            acPower = false;
+            sleepEnabled = false;
+            sleepStage = SLEEP_INACTIVE;
+            targetTemperature = baseTargetTemp;
+        }
+    }
+
+    void update(bool isPresent, uint32_t emptyDurationSec, float currentTemp, float currentHum, float heatIndex, uint32_t now, TestSafetyManager& safety) {
+        recordBreachSample(currentTemp, now);
+        evaluateBreach(currentTemp, now);
+        if (!enabled) return;
+
+        evaluateSleep(now);
+        float apparentTemp = psychrometricEnabled ? heatIndex : currentTemp;
+
+        // Presence
+        if (isPresent) {
+            if (!lastPresenceState || presenceTier == TIER_ECO_DRIFT || presenceTier == TIER_VACANT) {
+                presenceTier = TIER_WELCOME_BACK;
+                targetTemperature = baseTargetTemp;
+                if (acPower) {
+                    acTemp = (uint8_t)std::round(baseTargetTemp);
+                    acFan = "auto";
+                } else if (turnedOffByVacancy && apparentTemp > baseTargetTemp) {
+                    const char* reason = nullptr;
+                    if (safety.canTurnOn(now, reason)) {
+                        acPower = true;
+                        acTemp = (uint8_t)std::round(baseTargetTemp);
+                        acMode = "cool";
+                        acFan = "auto";
+                        safety.recordTransition(true, now);
+                        turnedOffByVacancy = false;
+                    }
+                }
+            } else {
+                presenceTier = TIER_ACTIVE;
+            }
+            lastPresenceState = true;
+        } else {
+            lastPresenceState = false;
+            if (emptyDurationSec < ecoDriftTimeoutSeconds) {
+                presenceTier = TIER_ACTIVE;
+            } else if (emptyDurationSec < emptyTimeoutSeconds) {
+                if (ecoDriftEnabled) {
+                    if (presenceTier != TIER_ECO_DRIFT) {
+                        presenceTier = TIER_ECO_DRIFT;
+                        if (acPower) {
+                            acTemp = (uint8_t)std::min(31.0f, baseTargetTemp + 1.0f);
+                            acFan = "low";
+                        }
+                    }
+                }
+            } else {
+                presenceTier = TIER_VACANT;
+                if (acPower) {
+                    const char* reason = nullptr;
+                    if (safety.canTurnOff(now, reason)) {
+                        acPower = false;
+                        safety.recordTransition(false, now);
+                        turnedOffByVacancy = true;
+                    }
+                    return;
+                }
+            }
+        }
+
+        // Psychrometric arbitration
+        if (psychrometricEnabled && currentHum > dryModeHumidityThreshold && currentTemp >= 21.0f && currentTemp <= 27.5f) {
+            if (!acPower && isPresent) {
+                const char* reason = nullptr;
+                if (safety.canTurnOn(now, reason)) {
+                    acMode = "dry";
+                    acPower = true;
+                    safety.recordTransition(true, now);
+                }
+                return;
+            } else if (acPower && acMode != "dry") {
+                acMode = "dry";
+            }
+        } else if (psychrometricEnabled && (apparentTemp > (targetTemperature + hysteresis) || currentTemp > 27.5f)) {
+            if (acPower && acMode == "dry") {
+                acMode = "cool";
+            }
+        }
+
+        // Dynamic setpoint tracking
+        if (acPower && presenceTier != TIER_ECO_DRIFT) {
+            uint8_t des = (uint8_t)std::round(targetTemperature);
+            if (acTemp != des) acTemp = des;
+        }
+
+        // Regulation
+        if (!acPower && isPresent && apparentTemp > (targetTemperature + hysteresis)) {
+            const char* reason = nullptr;
+            if (safety.canTurnOn(now, reason)) {
+                acPower = true;
+                acTemp = (uint8_t)std::round(targetTemperature);
+                acMode = "cool";
+                safety.recordTransition(true, now);
+            }
+        } else if (acPower && isPresent && apparentTemp < (targetTemperature - hysteresis)) {
+            const char* reason = nullptr;
+            if (safety.canTurnOff(now, reason)) {
+                acPower = false;
+                safety.recordTransition(false, now);
+            }
+        }
+    }
+};
+
 int main() {
 
     std::cout << "[TEST] Starting firmware logic unit tests..." << std::endl;
@@ -902,7 +1116,182 @@ int main() {
         std::cout << "[TEST 45] PASS: Raw IR transition decoder successfully parses 72-bit Azure Essence pulse stream" << std::endl;
     }
 
-    std::cout << "\nALL 45 UNIT TESTS PASSED SUCCESSFULLY!" << std::endl;
+    // Test 46: Circadian Metabolic Sleep Engine 4-stage curvature
+    {
+        TestSmartClimateEngine engine;
+        TestSafetyManager safety;
+        engine.acPower = true;
+        engine.acTemp = 23;
+        engine.baseTargetTemp = 25.0f;
+        engine.sleepEnabled = true;
+        engine.sleepPulldown = 23;
+        engine.sleepRampRate = 0.5f;
+        engine.sleepMaxTemp = 25.5f;
+        engine.sleepStartTime = 1000000;
+
+        // Stage 1: Pulldown at t = 30m elapsed
+        engine.update(true, 0, 23.5f, 50.0f, 23.5f, 1000000 + 1800000, safety);
+        assert(engine.sleepStage == TestSmartClimateEngine::SLEEP_PULLDOWN);
+        assert(std::fabs(engine.targetTemperature - 23.0f) < 0.01f);
+        assert(engine.acTemp == 23);
+
+        // Stage 2: Deep sleep ramp at t = 3hr elapsed (2hr into ramp -> +1.0C)
+        engine.update(true, 0, 24.2f, 50.0f, 24.2f, 1000000 + 10800000, safety);
+        assert(engine.sleepStage == TestSmartClimateEngine::SLEEP_DEEP_RAMP);
+        assert(std::fabs(engine.targetTemperature - 24.0f) < 0.01f);
+        assert(engine.acTemp == 24); // Confirms physical AC setpoint actually updated!
+
+        // Stage 2: Deep sleep ramp at t = 5hr elapsed (4hr into ramp -> +2.0C)
+        engine.update(true, 0, 25.1f, 50.0f, 25.1f, 1000000 + 18000000, safety);
+        assert(engine.sleepStage == TestSmartClimateEngine::SLEEP_DEEP_RAMP);
+        assert(std::fabs(engine.targetTemperature - 25.0f) < 0.01f);
+        assert(engine.acTemp == 25);
+
+        // Stage 3: REM Hold at t = 7hr elapsed (clamped at max 25.5C)
+        engine.update(true, 0, 25.6f, 50.0f, 25.6f, 1000000 + 25200000, safety);
+        assert(engine.sleepStage == TestSmartClimateEngine::SLEEP_REM_HOLD);
+        assert(std::fabs(engine.targetTemperature - 25.5f) < 0.01f);
+
+        // Stage 4: Wakeup shutdown at t = 8.5hr elapsed
+        engine.update(true, 0, 25.5f, 50.0f, 25.5f, 1000000 + 30600000, safety);
+        assert(engine.acPower == false);
+        assert(engine.sleepEnabled == false);
+        assert(engine.targetTemperature == 25.0f);
+        std::cout << "[TEST 46] PASS: Circadian metabolic sleep engine 4-stage curvature & dynamic setpoint ramping verified" << std::endl;
+    }
+
+    // Test 47: Multi-tier Presence & Micro-zoning transitions
+    {
+        TestSmartClimateEngine engine;
+        TestSafetyManager safety;
+        safety.recordTransition(true, 100000);
+        engine.acPower = true;
+        engine.acTemp = 24;
+        engine.baseTargetTemp = 24.0f;
+        engine.targetTemperature = 24.0f;
+
+        // Tier 1: Active
+        engine.update(true, 0, 24.0f, 50.0f, 24.0f, 100000, safety);
+        assert(engine.presenceTier == TestSmartClimateEngine::TIER_ACTIVE);
+        assert(engine.acTemp == 24);
+
+        // Tier 2: Eco-Drift after 6 min absence (360s > 300s)
+        engine.update(false, 360, 24.5f, 50.0f, 24.5f, 460000, safety);
+        assert(engine.presenceTier == TestSmartClimateEngine::TIER_ECO_DRIFT);
+        assert(engine.acTemp == 25); // +1C drifted setpoint
+        assert(engine.acFan == "low"); // Low blower
+
+        // Tier 3: Vacant Graceful Shutdown after 16 min absence (960s > 900s)
+        engine.update(false, 960, 25.0f, 50.0f, 25.0f, 1060000, safety);
+        assert(engine.presenceTier == TestSmartClimateEngine::TIER_VACANT);
+        assert(engine.acPower == false); // Safely powered off
+
+        // Tier 4: Welcome-Back upon person re-entry
+        engine.update(true, 0, 25.5f, 50.0f, 25.5f, 1260000, safety);
+        assert(engine.presenceTier == TestSmartClimateEngine::TIER_WELCOME_BACK);
+        assert(engine.acPower == true); // Power restored!
+        assert(engine.acTemp == 24);    // Target restored to base 24C!
+        assert(engine.acFan == "auto"); // Fan restored to auto!
+        std::cout << "[TEST 47] PASS: Multi-tier presence engine (Active -> Eco-Drift -> Vacant -> Welcome-Back) verified" << std::endl;
+    }
+
+    // Test 48: Psychrometric Autonomous Mode Arbitration
+    {
+        TestSmartClimateEngine engine;
+        TestSafetyManager safety;
+        safety.recordTransition(true, 100000);
+        engine.acPower = true;
+        engine.acMode = "cool";
+        engine.psychrometricEnabled = true;
+        engine.targetTemperature = 25.0f;
+        engine.dryModeHumidityThreshold = 65.0f;
+
+        // Mild temp 24C but high humidity 75% -> Auto arbitrate to DRY mode
+        engine.update(true, 0, 24.0f, 75.0f, 25.0f, 200000, safety);
+        assert(engine.acMode == "dry");
+
+        // Heat index escalates to 30C (> 25 + 1 = 26C) -> Auto arbitrate back to COOL mode
+        engine.update(true, 0, 28.0f, 70.0f, 30.5f, 250000, safety);
+        assert(engine.acMode == "cool");
+        std::cout << "[TEST 48] PASS: Psychrometric autonomous mode arbitration (auto DRY <-> auto COOL) verified" << std::endl;
+    }
+
+    // Test 49: Thermal Breach Detection & Leak Mitigation
+    {
+        TestSmartClimateEngine engine;
+        TestSafetyManager safety;
+        engine.acPower = true;
+        engine.acMode = "cool";
+        engine.acFan = "med";
+        engine.thermalBreachProtection = true;
+
+        // Feed baseline samples at 24.0C
+        engine.update(true, 0, 24.0f, 50.0f, 24.0f, 100000, safety);
+        engine.update(true, 0, 24.0f, 50.0f, 24.0f, 120000, safety);
+        engine.update(true, 0, 24.1f, 50.0f, 24.1f, 140000, safety);
+        engine.update(true, 0, 24.1f, 50.0f, 24.1f, 160000, safety);
+
+        // Rapid temperature spike: jumps to 25.5C at t = 200s (+1.5C rise in 100s, within 3m)
+        engine.update(true, 0, 25.5f, 50.0f, 25.5f, 200000, safety);
+        assert(engine.thermalBreachActive == true);
+        assert(engine.thermalBreachDelta >= 1.4f);
+        assert(engine.acFan == "high"); // Fan boosted to mitigate leak
+
+        // Clear breach on user dismissal
+        engine.clearBreach();
+        assert(engine.thermalBreachActive == false);
+        assert(engine.breachBuffer.empty());
+        std::cout << "[TEST 49] PASS: Thermal breach detection (> 1.2C in 3m), blower mitigation & buffer reset verified" << std::endl;
+    }
+
+    // Test 50: Full-Duplex IR Remote Decoding & Digital Twin Mirroring
+    {
+        uint8_t testWireState[kAzureStateLength];
+        encodeAzureFrame(true, 26, "med", "cool", testWireState);
+        uint16_t rawSim[kAzureRawTransitions];
+        uint16_t rawCount = generateAzureRaw(testWireState, rawSim, kAzureRawTransitions);
+        assert(rawCount == 147);
+
+        // Host decode logic matching decodeAzureEssenceRaw
+        auto hostDecodeRaw = [](const uint16_t* raw, uint16_t len, bool& outPwr, uint8_t& outTemp, std::string& outMode, std::string& outFan) -> bool {
+            if (!raw || len < 146) return false;
+            if (raw[0] < 3000 || raw[0] > 6000 || raw[1] < 1500 || raw[1] > 3300) return false;
+            uint8_t bytes[9];
+            uint16_t idx = 2;
+            for (int b = 0; b < 9; b++) {
+                uint8_t byteVal = 0;
+                for (int bit = 0; bit < 8; bit++) {
+                    if (idx + 1 >= len) return false;
+                    idx++;
+                    uint16_t space = raw[idx++];
+                    if (space >= 700 && space <= 1500) byteVal |= (1 << bit);
+                    else if (space >= 150 && space < 700) {}
+                    else return false;
+                }
+                bytes[b] = byteVal;
+            }
+            if (bytes[0] != 0x19) return false;
+            outPwr = (bytes[7] == 0x18);
+            outTemp = (bytes[6] >= 27 && bytes[6] <= 42) ? (bytes[6] - 11) : 25;
+            uint8_t modeN = bytes[1] & 0x0F;
+            outMode = (modeN == 0x02) ? "cool" : (modeN == 0x03) ? "dry" : (modeN == 0x04) ? "fan" : "auto";
+            uint8_t fanN = (bytes[1] >> 4) & 0x0F;
+            outFan = (fanN == 0x03) ? "high" : (fanN == 0x02) ? "med" : "auto";
+            return true;
+        };
+
+        bool pwr = false;
+        uint8_t t = 0;
+        std::string m, f;
+        assert(hostDecodeRaw(rawSim, rawCount, pwr, t, m, f) == true);
+        assert(pwr == true);
+        assert(t == 26);
+        assert(m == "cool");
+        assert(f == "med");
+        std::cout << "[TEST 50] PASS: Full-duplex IR digital twin decoding parses raw frame into synchronized ACState" << std::endl;
+    }
+
+    std::cout << "\nALL 50 UNIT TESTS PASSED SUCCESSFULLY!" << std::endl;
     return 0;
 }
 

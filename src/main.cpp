@@ -129,6 +129,35 @@ void processCommand(const String& rawCmd) {
             } else if (strcmp(commandType, "auto") == 0) {
                 bool en = doc["value"] | false;
                 automationEngine.setEnabled(en);
+            } else if (strcmp(commandType, "sleep") == 0) {
+                bool en = doc["value"] | false;
+                uint8_t pdown = doc["pulldown"] | 23;
+                float ramp = doc["ramp"] | 0.5f;
+                float maxT = doc["max_temp"] | 25.5f;
+                automationEngine.setCircadianSleep(en, pdown, ramp, maxT);
+            } else if (strcmp(commandType, "eco_drift") == 0) {
+                bool en = doc["value"] | false;
+                automationEngine.setEcoDriftEnabled(en);
+            } else if (strcmp(commandType, "psychro") == 0) {
+                bool en = doc["value"] | false;
+                automationEngine.setPsychrometricEnabled(en);
+            } else if (strcmp(commandType, "clear_breach") == 0) {
+                automationEngine.clearThermalBreach();
+                Serial.println("[CMD_OK] Thermal breach alert cleared");
+            } else if (strcmp(commandType, "auto_config") == 0) {
+                if (doc["enabled"].is<bool>()) automationEngine.setEnabled(doc["enabled"]);
+                if (doc["target_temp"].is<float>()) automationEngine.setTargetTemperature(doc["target_temp"]);
+                if (doc["hysteresis"].is<float>()) automationEngine.setHysteresis(doc["hysteresis"]);
+                if (doc["empty_timeout_s"].is<uint32_t>()) automationEngine.setEmptyTimeoutSeconds(doc["empty_timeout_s"]);
+                if (doc["eco_drift_timeout_s"].is<uint32_t>()) automationEngine.setEcoDriftTimeoutSeconds(doc["eco_drift_timeout_s"]);
+                if (doc["eco_drift_enabled"].is<bool>()) automationEngine.setEcoDriftEnabled(doc["eco_drift_enabled"]);
+                if (doc["psychrometric_enabled"].is<bool>()) automationEngine.setPsychrometricEnabled(doc["psychrometric_enabled"]);
+                if (doc["dry_mode_humidity_threshold"].is<float>()) automationEngine.setDryModeHumidityThreshold(doc["dry_mode_humidity_threshold"]);
+                if (doc["thermal_breach_protection"].is<bool>()) automationEngine.setThermalBreachProtection(doc["thermal_breach_protection"]);
+                if (doc["sleep_enabled"].is<bool>()) {
+                    automationEngine.setCircadianSleep(doc["sleep_enabled"], doc["pulldown_temp"] | 23, doc["ramp_rate"] | 0.5f, doc["max_temp"] | 25.5f);
+                }
+                Serial.println("[CMD_OK] Automation engine configuration updated");
             } else if (strcmp(commandType, "state") == 0) {
                 Serial.println(acController.getState().toJSONString());
             } else if (strcmp(commandType, "energy") == 0) {
@@ -221,6 +250,39 @@ void processCommand(const String& rawCmd) {
         } else {
             Serial.println("[CMD_ERR] Usage: SET_TARGET <temp>");
         }
+    } else if (upper.startsWith("SLEEP_ON")) {
+        int spaceIdx = upper.indexOf(' ');
+        uint8_t pdown = 23;
+        if (spaceIdx > 0) {
+            pdown = upper.substring(spaceIdx + 1).toInt();
+            if (pdown < 18 || pdown > 28) pdown = 23;
+        }
+        automationEngine.setCircadianSleep(true, pdown, 0.5f, 25.5f);
+        Serial.printf("[CMD_OK] Circadian metabolic sleep schedule ACTIVE (Pulldown: %d C)\n", pdown);
+    } else if (upper == "SLEEP_OFF") {
+        automationEngine.setCircadianSleep(false);
+        Serial.println("[CMD_OK] Circadian sleep schedule DISABLED");
+    } else if (upper == "ECO_ON") {
+        automationEngine.setEcoDriftEnabled(true);
+        Serial.println("[CMD_OK] Presence Eco-Drift (+1C drift) ENABLED");
+    } else if (upper == "ECO_OFF") {
+        automationEngine.setEcoDriftEnabled(false);
+        Serial.println("[CMD_OK] Presence Eco-Drift DISABLED");
+    } else if (upper == "PSYCHRO_ON") {
+        automationEngine.setPsychrometricEnabled(true);
+        Serial.println("[CMD_OK] Psychrometric comfort engine & autonomous mode arbitration ENABLED");
+    } else if (upper == "PSYCHRO_OFF") {
+        automationEngine.setPsychrometricEnabled(false);
+        Serial.println("[CMD_OK] Psychrometric comfort engine DISABLED");
+    } else if (upper == "CLEAR_BREACH") {
+        automationEngine.clearThermalBreach();
+        Serial.println("[CMD_OK] Active thermal breach cleared");
+    } else if (upper == "BREACH_ON") {
+        automationEngine.setThermalBreachProtection(true);
+        Serial.println("[CMD_OK] Thermal breach protection ENABLED");
+    } else if (upper == "BREACH_OFF") {
+        automationEngine.setThermalBreachProtection(false);
+        Serial.println("[CMD_OK] Thermal breach protection DISABLED");
     } else if (upper == "GET_STATE" || upper == "STATE") {
         Serial.println(acController.getState().toJSONString());
     } else if (upper == "GET_PRESENCE") {
@@ -274,39 +336,43 @@ void loop() {
             const ac::ir::IRCaptureInfo& cap = irReceiver.getLastCapture();
             if (cap.hasAcState) {
                 acController.applyExternalState(cap.acState);
+                JsonDocument syncDoc;
+                syncDoc["device_id"] = deviceId;
+                syncDoc["power"] = cap.acState.power;
+                syncDoc["temperature"] = cap.acState.temperature;
+                syncDoc["mode"] = cap.acState.mode;
+                syncDoc["fan_speed"] = cap.acState.fanSpeed;
+                syncDoc["source"] = "ir_remote";
+                syncDoc["timestamp_ms"] = millis();
+                serializeJson(syncDoc, Serial);
+                Serial.println();
                 if (cloudClient.isEnabled()) {
-                    JsonDocument syncDoc;
-                    syncDoc["device_id"] = deviceId;
-                    syncDoc["power"] = cap.acState.power;
-                    syncDoc["temperature"] = cap.acState.temperature;
-                    syncDoc["mode"] = cap.acState.mode;
-                    syncDoc["fan_speed"] = cap.acState.fanSpeed;
-                    syncDoc["source"] = "ir_remote";
-                    syncDoc["timestamp_ms"] = millis();
                     cloudClient.update(syncDoc);
                 }
             }
+            JsonDocument irDoc;
+            irDoc["device_id"] = deviceId;
+            irDoc["type"] = "ir_capture";
+            irDoc["protocol"] = cap.protocol;
+            irDoc["bits"] = cap.bits;
+            irDoc["hex"] = cap.hexCode;
+            irDoc["is_ac"] = cap.isAc;
+            if (cap.hasAcState) {
+                irDoc["ac_power"] = cap.acState.power;
+                irDoc["ac_temp"] = cap.acState.temperature;
+                irDoc["ac_mode"] = cap.acState.mode;
+                irDoc["ac_fan"] = cap.acState.fanSpeed;
+            }
+            if (cap.rawLength > 0) {
+                JsonArray rawArr = irDoc["raw"].to<JsonArray>();
+                for (uint16_t r = 0; r < cap.rawLength; r++) {
+                    rawArr.add(cap.rawData[r]);
+                }
+            }
+            irDoc["timestamp_ms"] = cap.timestampMs;
+            serializeJson(irDoc, Serial);
+            Serial.println();
             if (cloudClient.isEnabled()) {
-                JsonDocument irDoc;
-                irDoc["device_id"] = deviceId;
-                irDoc["type"] = "ir_capture";
-                irDoc["protocol"] = cap.protocol;
-                irDoc["bits"] = cap.bits;
-                irDoc["hex"] = cap.hexCode;
-                irDoc["is_ac"] = cap.isAc;
-                if (cap.hasAcState) {
-                    irDoc["ac_power"] = cap.acState.power;
-                    irDoc["ac_temp"] = cap.acState.temperature;
-                    irDoc["ac_mode"] = cap.acState.mode;
-                    irDoc["ac_fan"] = cap.acState.fanSpeed;
-                }
-                if (cap.rawLength > 0) {
-                    JsonArray rawArr = irDoc["raw"].to<JsonArray>();
-                    for (uint16_t r = 0; r < cap.rawLength; r++) {
-                        rawArr.add(cap.rawData[r]);
-                    }
-                }
-                irDoc["timestamp_ms"] = cap.timestampMs;
                 cloudClient.update(irDoc);
             }
             irReceiver.clearLastCapture();
@@ -386,6 +452,14 @@ void loop() {
         cloudDoc["fan_speed"] = acController.getState().fanSpeed;
         cloudDoc["presence"] = HAS_PRESENCE_SENSOR ? presenceSensor.isPresent() : false;
         cloudDoc["presence_installed"] = HAS_PRESENCE_SENSOR;
+        cloudDoc["presence_tier"] = automationEngine.getPresenceTierStr();
+        cloudDoc["sleep_stage"] = automationEngine.getSleepStageStr();
+        cloudDoc["sleep_enabled"] = automationEngine.isCircadianSleepEnabled();
+        cloudDoc["thermal_breach"] = automationEngine.isThermalBreachActive();
+        cloudDoc["thermal_breach_delta"] = automationEngine.getThermalBreachDelta();
+        cloudDoc["eco_drift_enabled"] = automationEngine.isEcoDriftEnabled();
+        cloudDoc["psychrometric_enabled"] = automationEngine.isPsychrometricEnabled();
+        cloudDoc["auto_enabled"] = automationEngine.isEnabled();
         cloudDoc["ir_tx_installed"] = HAS_IR_TRANSMITTER;
         cloudDoc["ir_rx_installed"] = true;
         cloudDoc["dht22_installed"] = true;
