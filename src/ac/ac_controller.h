@@ -21,6 +21,7 @@ public:
     virtual bool setFanSpeed(const String& fanSpeed, const String& source = "user") = 0;
     virtual bool setSwing(bool swing, const String& source = "user") = 0;
     virtual bool setSleep(bool sleep, const String& source = "user") = 0;
+    virtual bool setState(bool power, uint8_t tempC, const String& mode, const String& fanSpeed, const String& source = "user") = 0;
 
     virtual const ACState& getState() const = 0;
     virtual bool sendState(const String& source = "user") = 0;
@@ -42,6 +43,7 @@ public:
     bool setFanSpeed(const String& fanSpeed, const String& source = "user") override;
     bool setSwing(bool swing, const String& source = "user") override;
     bool setSleep(bool sleep, const String& source = "user") override;
+    bool setState(bool power, uint8_t tempC, const String& mode, const String& fanSpeed, const String& source = "user") override;
 
     const ACState& getState() const override { return _state; }
     bool sendState(const String& source = "user") override;

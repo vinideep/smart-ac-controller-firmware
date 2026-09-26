@@ -30,8 +30,9 @@ ac::network::NetworkManager networkManager;
 ac::api::LocalAPIServer apiServer(acController, dhtDriver, presenceSensor, safetyManager, networkManager, deviceId);
 ac::cloud::CloudClient cloudClient(BACKEND_URL, DEVICE_TOKEN);
 
-// Serial command buffer
+// Serial command buffer and TX blanking timestamp
 String serialInputBuffer = "";
+uint32_t lastTxBlankingTime = 0;
 
 void processCommand(const String& cmdStr);
 
@@ -76,6 +77,8 @@ void setup() {
     energyMonitor.begin();
     irReceiver.begin();
     acController.begin();
+    acController.getTransmitter().setReceiver(&irReceiver);
+    irReceiver.setTransmitter(&acController.getTransmitter());
     automationEngine.begin();
 
     // 6. Initialize Network Manager (Wi-Fi STA / Fallback AP) & Local REST Server
@@ -90,7 +93,7 @@ void setup() {
                   PRESENCE_PIN, PRESENCE_ACTIVE_LOW ? "LOW" : "HIGH", HAS_PRESENCE_SENSOR ? "ENABLED" : "DISABLED");
     Serial.printf("[SYSTEM] Energy Monitor active (Nominal: %.0fV, Tariff: %.2f/kWh)\n",
                   energyMonitor.getNominalVoltage(), energyMonitor.getTariff());
-    Serial.println("[SYSTEM] Ready. Commands: POWER_ON, POWER_OFF, SET_TEMP <16-31>, SET_MODE <COOL|DRY|FAN|AUTO>, SET_FAN <AUTO|MED|HIGH>, AUTO_ON, AUTO_OFF, GET_STATE, GET_PRESENCE, GET_ENERGY, SET_TARIFF <rate>, SET_PRESENCE_POLARITY <HIGH|LOW>, TEST_TX");
+    Serial.println("[SYSTEM] Ready. Commands: POWER_ON, POWER_OFF, SET_TEMP <16-31>, SET_MODE <COOL|DRY|FAN|AUTO>, SET_FAN <AUTO|MED|HIGH>, SET_AC_STATE <1|0> <temp> <mode> <fan>, AUTO_ON, AUTO_OFF, GET_STATE, GET_PRESENCE, GET_ENERGY, SET_TARIFF <rate>, SET_PRESENCE_POLARITY <HIGH|LOW>, TEST_TX");
 
     // Visual boot indication (double blink)
     for (int i = 0; i < 2; i++) {
@@ -112,26 +115,47 @@ void processCommand(const String& rawCmd) {
         DeserializationError err = deserializeJson(doc, cmd);
         if (!err) {
             const char* commandType = doc["cmd"] | "";
-            if (strcmp(commandType, "power") == 0) {
+            if (strcmp(commandType, "set_ac_state") == 0 || strcmp(commandType, "ac_state") == 0) {
+                bool pwr = doc["power"] | false;
+                uint8_t temp = doc["temp"] | (doc["temperature"] | 25);
+                const char* m = doc["mode"] | "cool";
+                const char* f = doc["fan"] | (doc["fan_speed"] | "auto");
+                digitalWrite(STATUS_LED_PIN, HIGH);
+                if (acController.setState(pwr, temp, String(m), String(f), "json_cmd")) {
+                    lastTxBlankingTime = millis();
+                    safetyManager.recordPowerTransition(pwr, millis());
+                    safetyManager.recordCommandSent(millis());
+                    digitalWrite(STATUS_LED_PIN, LOW);
+                    Serial.printf("[CMD_OK] AC state set: Power=%d Temp=%d Mode=%s Fan=%s\n",
+                                  pwr ? 1 : 0, temp, m, f);
+                } else {
+                    digitalWrite(STATUS_LED_PIN, LOW);
+                    Serial.println("[CMD_ERR] Invalid state parameters");
+                }
+            } else if (strcmp(commandType, "power") == 0) {
                 bool pwr = doc["value"] | false;
                 digitalWrite(STATUS_LED_PIN, HIGH);
+                lastTxBlankingTime = millis();
                 acController.setPower(pwr, "json_cmd");
                 safetyManager.recordPowerTransition(pwr, millis());
                 digitalWrite(STATUS_LED_PIN, LOW);
                 Serial.printf("[CMD_OK] AC Power set to %s\n", pwr ? "ON" : "OFF");
             } else if (strcmp(commandType, "temp") == 0) {
                 uint8_t t = doc["value"] | 25;
+                lastTxBlankingTime = millis();
                 acController.setTemperature(t, "serial_json");
                 safetyManager.recordCommandSent(millis());
             } else if (strcmp(commandType, "mode") == 0) {
                 const char* m = doc["value"] | "cool";
                 digitalWrite(STATUS_LED_PIN, HIGH);
+                lastTxBlankingTime = millis();
                 acController.setMode(String(m), "serial_json");
                 safetyManager.recordCommandSent(millis());
                 digitalWrite(STATUS_LED_PIN, LOW);
                 Serial.printf("[CMD_OK] AC Mode set to %s\n", m);
             } else if (strcmp(commandType, "fan") == 0) {
                 const char* spd = doc["value"] | "auto";
+                lastTxBlankingTime = millis();
                 acController.setFanSpeed(String(spd), "serial_json");
                 safetyManager.recordCommandSent(millis());
             } else if (strcmp(commandType, "auto") == 0) {
@@ -188,6 +212,7 @@ void processCommand(const String& rawCmd) {
                         rawBuf[i] = rawArr[i];
                     }
                     digitalWrite(STATUS_LED_PIN, HIGH);
+                    lastTxBlankingTime = millis();
                     acController.getTransmitter().sendRaw(rawBuf, len, freq);
                     safetyManager.recordCommandSent(millis());
                     digitalWrite(STATUS_LED_PIN, LOW);
@@ -206,14 +231,75 @@ void processCommand(const String& rawCmd) {
     String upper = cmd;
     upper.toUpperCase();
 
-    if (upper == "POWER_ON" || upper == "ON") {
+    if (upper.startsWith("SET_AC_STATE")) {
+        int spaceIdx = cmd.indexOf(' ');
+        if (spaceIdx > 0) {
+            String args = cmd.substring(spaceIdx + 1);
+            args.trim();
+            std::vector<String> tokens;
+            int start = 0;
+            while (start < (int)args.length()) {
+                int nextSpace = args.indexOf(' ', start);
+                if (nextSpace == -1) {
+                    tokens.push_back(args.substring(start));
+                    break;
+                }
+                tokens.push_back(args.substring(start, nextSpace));
+                start = nextSpace + 1;
+                while (start < (int)args.length() && args.charAt(start) == ' ') start++;
+            }
+            if (tokens.size() >= 4) {
+                String pwrStr = tokens[0];
+                pwrStr.toLowerCase();
+                bool pwr = (pwrStr == "1" || pwrStr == "true" || pwrStr == "on");
+                int temp = tokens[1].toInt();
+                String mode = tokens[2];
+                mode.toLowerCase();
+                String fan = tokens[3];
+                fan.toLowerCase();
+
+                if (temp < ac::control::AzureEssenceController::kMinTemperature ||
+                    temp > ac::control::AzureEssenceController::kMaxTemperature) {
+                    Serial.println("[CMD_ERR] Temperature must be between 16 and 31 C");
+                    return;
+                }
+                if (mode != "cool" && mode != "dry" && mode != "fan" && mode != "auto") {
+                    Serial.println("[CMD_ERR] Mode must be cool, dry, fan, or auto");
+                    return;
+                }
+                if (fan != "auto" && fan != "med" && fan != "low" && fan != "high") {
+                    Serial.println("[CMD_ERR] Fan speed must be auto, med, low, or high");
+                    return;
+                }
+
+                digitalWrite(STATUS_LED_PIN, HIGH);
+                if (acController.setState(pwr, (uint8_t)temp, mode, fan, "serial")) {
+                    lastTxBlankingTime = millis();
+                    safetyManager.recordPowerTransition(pwr, millis());
+                    safetyManager.recordCommandSent(millis());
+                    digitalWrite(STATUS_LED_PIN, LOW);
+                    Serial.printf("[CMD_OK] AC state set: Power=%d Temp=%d Mode=%s Fan=%s\n",
+                                  pwr ? 1 : 0, temp, mode.c_str(), fan.c_str());
+                } else {
+                    digitalWrite(STATUS_LED_PIN, LOW);
+                    Serial.println("[CMD_ERR] Failed to set AC state");
+                }
+            } else {
+                Serial.println("[CMD_ERR] Usage: SET_AC_STATE <1|0> <temp> <mode> <fan>");
+            }
+        } else {
+            Serial.println("[CMD_ERR] Usage: SET_AC_STATE <1|0> <temp> <mode> <fan>");
+        }
+    } else if (upper == "POWER_ON" || upper == "ON") {
         digitalWrite(STATUS_LED_PIN, HIGH);
+        lastTxBlankingTime = millis();
         acController.setPower(true, "manual_cmd");
         safetyManager.recordPowerTransition(true, millis());
         digitalWrite(STATUS_LED_PIN, LOW);
         Serial.println("[CMD_OK] AC Power ON sent");
     } else if (upper == "POWER_OFF" || upper == "OFF") {
         digitalWrite(STATUS_LED_PIN, HIGH);
+        lastTxBlankingTime = millis();
         acController.setPower(false, "manual_cmd");
         safetyManager.recordPowerTransition(false, millis());
         digitalWrite(STATUS_LED_PIN, LOW);
@@ -225,6 +311,7 @@ void processCommand(const String& rawCmd) {
             if (tempVal >= ac::control::AzureEssenceController::kMinTemperature &&
                 tempVal <= ac::control::AzureEssenceController::kMaxTemperature) {
                 digitalWrite(STATUS_LED_PIN, HIGH);
+                lastTxBlankingTime = millis();
                 acController.setTemperature((uint8_t)tempVal, "serial");
                 safetyManager.recordCommandSent(millis());
                 digitalWrite(STATUS_LED_PIN, LOW);
@@ -242,6 +329,7 @@ void processCommand(const String& rawCmd) {
             m.toLowerCase();
             if (m == "cool" || m == "dry" || m == "fan" || m == "auto") {
                 digitalWrite(STATUS_LED_PIN, HIGH);
+                lastTxBlankingTime = millis();
                 acController.setMode(m, "serial");
                 safetyManager.recordCommandSent(millis());
                 digitalWrite(STATUS_LED_PIN, LOW);
@@ -258,6 +346,7 @@ void processCommand(const String& rawCmd) {
             String spd = upper.substring(spaceIdx + 1);
             spd.toLowerCase();
             digitalWrite(STATUS_LED_PIN, HIGH);
+            lastTxBlankingTime = millis();
             acController.setFanSpeed(spd, "serial");
             safetyManager.recordCommandSent(millis());
             digitalWrite(STATUS_LED_PIN, LOW);
@@ -358,6 +447,7 @@ void processCommand(const String& rawCmd) {
         }
     } else if (upper == "TEST_TX") {
         digitalWrite(STATUS_LED_PIN, HIGH);
+        lastTxBlankingTime = millis();
         acController.getTransmitter().testPowerOn();
         safetyManager.recordPowerTransition(true, millis());
         digitalWrite(STATUS_LED_PIN, LOW);
@@ -375,51 +465,60 @@ void loop() {
     // 2. Poll IR Learning Receiver (non-blocking) & Mirror AC State
     if (irReceiver.update(deviceId)) {
         if (irReceiver.hasLastCapture()) {
-            const ac::ir::IRCaptureInfo& cap = irReceiver.getLastCapture();
-            if (cap.hasAcState) {
-                acController.applyExternalState(cap.acState);
-                safetyManager.recordPowerTransition(cap.acState.power, millis());
-                safetyManager.recordCommandSent(millis());
-                JsonDocument syncDoc;
-                syncDoc["device_id"] = deviceId;
-                syncDoc["power"] = cap.acState.power;
-                syncDoc["temperature"] = cap.acState.temperature;
-                syncDoc["mode"] = cap.acState.mode;
-                syncDoc["fan_speed"] = cap.acState.fanSpeed;
-                syncDoc["source"] = "ir_remote";
-                syncDoc["timestamp_ms"] = millis();
-                serializeJson(syncDoc, Serial);
+            uint32_t now = millis();
+            uint32_t lastTx = acController.getTransmitter().getLastTxEndTime();
+            if ((lastTxBlankingTime > 0 && (now - lastTxBlankingTime < 300)) ||
+                (lastTx > 0 && (now - lastTx < 300))) {
+                Serial.printf("[IR_BLANKING] Ignoring demodulated IR signal within %lu ms of transmission (self-loopback)\n",
+                              (unsigned long)(now - (lastTxBlankingTime > lastTx ? lastTxBlankingTime : lastTx)));
+                irReceiver.clearLastCapture();
+            } else {
+                const ac::ir::IRCaptureInfo& cap = irReceiver.getLastCapture();
+                if (cap.hasAcState) {
+                    acController.applyExternalState(cap.acState);
+                    safetyManager.recordPowerTransition(cap.acState.power, millis());
+                    safetyManager.recordCommandSent(millis());
+                    JsonDocument syncDoc;
+                    syncDoc["device_id"] = deviceId;
+                    syncDoc["power"] = cap.acState.power;
+                    syncDoc["temperature"] = cap.acState.temperature;
+                    syncDoc["mode"] = cap.acState.mode;
+                    syncDoc["fan_speed"] = cap.acState.fanSpeed;
+                    syncDoc["source"] = "ir_remote";
+                    syncDoc["timestamp_ms"] = millis();
+                    serializeJson(syncDoc, Serial);
+                    Serial.println();
+                    if (cloudClient.isEnabled()) {
+                        cloudClient.pushTelemetry(syncDoc);
+                    }
+                }
+                JsonDocument irDoc;
+                irDoc["device_id"] = deviceId;
+                irDoc["type"] = "ir_capture";
+                irDoc["protocol"] = cap.protocol;
+                irDoc["bits"] = cap.bits;
+                irDoc["hex"] = cap.hexCode;
+                irDoc["is_ac"] = cap.isAc;
+                if (cap.hasAcState) {
+                    irDoc["ac_power"] = cap.acState.power;
+                    irDoc["ac_temp"] = cap.acState.temperature;
+                    irDoc["ac_mode"] = cap.acState.mode;
+                    irDoc["ac_fan"] = cap.acState.fanSpeed;
+                }
+                if (cap.rawLength > 0) {
+                    JsonArray rawArr = irDoc["raw"].to<JsonArray>();
+                    for (uint16_t r = 0; r < cap.rawLength; r++) {
+                        rawArr.add(cap.rawData[r]);
+                    }
+                }
+                irDoc["timestamp_ms"] = cap.timestampMs;
+                serializeJson(irDoc, Serial);
                 Serial.println();
                 if (cloudClient.isEnabled()) {
-                    cloudClient.pushTelemetry(syncDoc);
+                    cloudClient.pushTelemetry(irDoc);
                 }
+                irReceiver.clearLastCapture();
             }
-            JsonDocument irDoc;
-            irDoc["device_id"] = deviceId;
-            irDoc["type"] = "ir_capture";
-            irDoc["protocol"] = cap.protocol;
-            irDoc["bits"] = cap.bits;
-            irDoc["hex"] = cap.hexCode;
-            irDoc["is_ac"] = cap.isAc;
-            if (cap.hasAcState) {
-                irDoc["ac_power"] = cap.acState.power;
-                irDoc["ac_temp"] = cap.acState.temperature;
-                irDoc["ac_mode"] = cap.acState.mode;
-                irDoc["ac_fan"] = cap.acState.fanSpeed;
-            }
-            if (cap.rawLength > 0) {
-                JsonArray rawArr = irDoc["raw"].to<JsonArray>();
-                for (uint16_t r = 0; r < cap.rawLength; r++) {
-                    rawArr.add(cap.rawData[r]);
-                }
-            }
-            irDoc["timestamp_ms"] = cap.timestampMs;
-            serializeJson(irDoc, Serial);
-            Serial.println();
-            if (cloudClient.isEnabled()) {
-                cloudClient.pushTelemetry(irDoc);
-            }
-            irReceiver.clearLastCapture();
         }
     }
 

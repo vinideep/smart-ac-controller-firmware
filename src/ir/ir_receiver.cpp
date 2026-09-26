@@ -1,4 +1,5 @@
 #include "ir_receiver.h"
+#include "ir_transmitter.h"
 #include "ir_protocol_azure.h"
 #include <ArduinoJson.h>
 
@@ -8,11 +9,15 @@ extern atomic_irparams_t params;
 
 namespace ac::ir {
 
+IRReceiverDriver* IRReceiverDriver::s_instance = nullptr;
+
 IRReceiverDriver::IRReceiverDriver(uint8_t pin, uint16_t bufferSize, uint8_t timeout)
     : _pin(pin),
       _bufferSize(bufferSize),
       _timeout(timeout),
-      _irrecv(pin, bufferSize, timeout, true) {}
+      _irrecv(pin, bufferSize, timeout, true) {
+    s_instance = this;
+}
 
 void IRReceiverDriver::begin() {
     _irrecv.setUnknownThreshold(kMinNoiseThreshold);
@@ -46,6 +51,32 @@ bool IRReceiverDriver::update(const String& deviceId) {
 
     if (_irrecv.decode(&_results)) {
         if (_results.rawlen >= kMinNoiseThreshold) {
+            uint32_t now = millis();
+            bool isBlanked = false;
+            uint32_t txDelta = 0;
+            if (_transmitter) {
+                if (_transmitter->isTransmitting()) {
+                    isBlanked = true;
+                } else if (_transmitter->getLastTxEndTime() > 0) {
+                    txDelta = now - _transmitter->getLastTxEndTime();
+                    if (txDelta < _blankingWindowMs) {
+                        isBlanked = true;
+                    }
+                }
+            } else if (_lastTxBlankingMs > 0) {
+                txDelta = now - _lastTxBlankingMs;
+                if (txDelta < _blankingWindowMs) {
+                    isBlanked = true;
+                }
+            }
+
+            if (isBlanked) {
+                Serial.printf("[IR_BLANKING] Loopback signal suppressed during TX blanking window (%lu ms since TX)\n",
+                              (unsigned long)txDelta);
+                _irrecv.resume();
+                return false;
+            }
+
             _captureCount++;
 
             digitalWrite(STATUS_LED_PIN, HIGH);
@@ -141,8 +172,20 @@ bool IRReceiverDriver::update(const String& deviceId) {
     return false;
 }
 
+void IRReceiverDriver::pause() {
+    _irrecv.pause();
+}
+
 void IRReceiverDriver::resume() {
     _irrecv.resume();
+}
+
+void IRReceiverDriver::enable() {
+    _irrecv.enableIRIn(true);
+}
+
+void IRReceiverDriver::disable() {
+    _irrecv.disableIRIn();
 }
 
 void IRReceiverDriver::printStructuredOutput(const decode_results& results, const String& deviceId) {

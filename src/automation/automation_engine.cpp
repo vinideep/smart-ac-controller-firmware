@@ -319,17 +319,13 @@ void AutomationEngine::update() {
             _turnedOffByVacancy = false;
             if (acOn) {
                 uint8_t restored = (uint8_t)round(_config.baseTargetTemp);
-                _ac.setTemperature(restored, "welcome_back");
-                _ac.setFanSpeed("auto", "welcome_back");
+                _ac.setState(true, restored, _ac.getState().mode, "auto", "welcome_back");
                 _safety.recordCommandSent(now);
                 logEvent("welcome_back_motion", "setpoint_restored", currentTemp);
             } else if (apparentTemp > _config.baseTargetTemp) {
                 const char* reason = nullptr;
                 if (_safety.canTurnOn(now, reason)) {
-                    _ac.setTemperature((uint8_t)round(_config.baseTargetTemp), "welcome_back");
-                    _ac.setMode("cool", "welcome_back");
-                    _ac.setFanSpeed("auto", "welcome_back");
-                    _ac.setPower(true, "welcome_back");
+                    _ac.setState(true, (uint8_t)round(_config.baseTargetTemp), "cool", "auto", "welcome_back");
                     _safety.recordPowerTransition(true, now);
                     acOn = true;
                     logEvent("power_on", "welcome_back_restoration", currentTemp);
@@ -350,8 +346,7 @@ void AutomationEngine::update() {
                     _presenceTier = PresenceTier::EcoDrift;
                     if (acOn) {
                         uint8_t ecoSetpoint = (uint8_t)min((float)31.0f, _config.baseTargetTemp + 1.0f);
-                        _ac.setTemperature(ecoSetpoint, "eco_drift");
-                        _ac.setFanSpeed("low", "eco_drift");
+                        _ac.setState(true, ecoSetpoint, _ac.getState().mode, "low", "eco_drift");
                         _safety.recordCommandSent(now);
                         logEvent("eco_drift_engaged", "unoccupied_5min_drift", currentTemp);
                     }
@@ -379,8 +374,7 @@ void AutomationEngine::update() {
         if (!acOn && effectivePresence) {
             const char* reason = nullptr;
             if (_safety.canTurnOn(now, reason)) {
-                _ac.setMode("dry", "psychro_humidity_arbitration");
-                _ac.setPower(true, "psychro_humidity_arbitration");
+                _ac.setState(true, _ac.getState().temperature, "dry", _ac.getState().fanSpeed, "psychro_humidity_arbitration");
                 _safety.recordPowerTransition(true, now);
                 acOn = true;
                 logEvent("power_on", "high_humidity_dehumidify_mode", currentTemp);
@@ -415,9 +409,7 @@ void AutomationEngine::update() {
     if (!acOn && effectivePresence && apparentTemp > (_config.targetTemperature + _config.hysteresis)) {
         const char* reason = nullptr;
         if (_safety.canTurnOn(now, reason)) {
-            _ac.setTemperature((uint8_t)round(_config.targetTemperature), "automation_climate");
-            _ac.setMode("cool", "automation_climate");
-            _ac.setPower(true, "automation_climate");
+            _ac.setState(true, (uint8_t)round(_config.targetTemperature), "cool", _ac.getState().fanSpeed, "automation_climate");
             _safety.recordPowerTransition(true, now);
             logEvent("power_on", "heat_index_above_threshold", currentTemp);
         }

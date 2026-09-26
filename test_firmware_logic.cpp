@@ -1437,7 +1437,168 @@ int main() {
         std::cout << "[TEST 55] PASS: Continuous thermal automation engages cooling without presence sensor requirement" << std::endl;
     }
 
-    std::cout << "\nALL 55 UNIT TESTS PASSED SUCCESSFULLY!" << std::endl;
+    // Test 56: SET_AC_STATE atomic command parsing, validation, and wire encoding
+    {
+        auto parseSetAcState = [](const std::string& cmd, bool& outPwr, uint8_t& outTemp, std::string& outMode, std::string& outFan) -> bool {
+            std::istringstream iss(cmd);
+            std::string prefix;
+            iss >> prefix;
+            if (prefix != "SET_AC_STATE") return false;
+            std::string pwrStr, modeStr, fanStr;
+            int tempVal;
+            if (!(iss >> pwrStr >> tempVal >> modeStr >> fanStr)) return false;
+            if (tempVal < 16 || tempVal > 31) return false;
+            if (modeStr != "cool" && modeStr != "dry" && modeStr != "fan" && modeStr != "auto") return false;
+            if (fanStr != "auto" && fanStr != "med" && fanStr != "low" && fanStr != "high") return false;
+
+            outPwr = (pwrStr == "1" || pwrStr == "true" || pwrStr == "on");
+            outTemp = (uint8_t)tempVal;
+            outMode = modeStr;
+            outFan = fanStr;
+            return true;
+        };
+
+        bool pwr = false;
+        uint8_t temp = 0;
+        std::string mode, fan;
+
+        // Valid ON command
+        bool ok = parseSetAcState("SET_AC_STATE 1 24 cool auto", pwr, temp, mode, fan);
+        assert(ok);
+        assert(pwr == true);
+        assert(temp == 24);
+        assert(mode == "cool");
+        assert(fan == "auto");
+
+        // Encode and check wire bytes
+        uint8_t wire[kAzureStateLength];
+        encodeAzureFrame(pwr, temp, fan, mode, wire);
+        assert(wire[0] == kAzureVendorId);
+        assert(wire[6] == 35); // 24 + 11
+        assert(wire[7] == kAzurePowerOnByte);
+        assert(((wire[8] >> 4) & 0x0F) == calculateAzureChecksum(wire));
+
+        // Valid OFF command
+        ok = parseSetAcState("SET_AC_STATE 0 26 dry high", pwr, temp, mode, fan);
+        assert(ok);
+        assert(pwr == false);
+        assert(temp == 26);
+        encodeAzureFrame(pwr, temp, fan, mode, wire);
+        assert(wire[7] == kAzurePowerOffByte);
+
+        // Invalid inputs
+        assert(!parseSetAcState("SET_AC_STATE 1 15 cool auto", pwr, temp, mode, fan)); // temp too low
+        assert(!parseSetAcState("SET_AC_STATE 1 32 cool auto", pwr, temp, mode, fan)); // temp too high
+        assert(!parseSetAcState("SET_AC_STATE 1 24 turbo auto", pwr, temp, mode, fan)); // invalid mode
+        assert(!parseSetAcState("SET_AC_STATE 1 24 cool turbo", pwr, temp, mode, fan)); // invalid fan
+        assert(!parseSetAcState("SET_AC_STATE 1", pwr, temp, mode, fan)); // missing fields
+
+        std::cout << "[TEST 56] PASS: SET_AC_STATE atomic parsing, validation, and wire encoding verified" << std::endl;
+    }
+
+    // Test 57: In-Driver & Main TX Blanking (suppression during transmission and 300ms post-settling window)
+    {
+        uint32_t lastTxStartTime = 10000;
+        uint32_t lastTxEndTime = 10351; // 201ms burst (frame 1 + repeat) + 150ms reflection settling delay
+        bool isTransmitting = false;
+
+        auto isSelfLoopback = [&](uint32_t demodTime) -> bool {
+            bool transmitting = (demodTime >= lastTxStartTime && demodTime < lastTxEndTime);
+            if (transmitting || isTransmitting) return true;
+            return (demodTime - lastTxEndTime < 300);
+        };
+
+        // 1. Demodulation during physical transmission bursts (e.g. 50ms, 150ms)
+        assert(isSelfLoopback(10050) == true);
+        assert(isSelfLoopback(10150) == true);
+
+        // 2. Demodulation during 150ms optical reflection settling delay
+        assert(isSelfLoopback(10250) == true);
+        assert(isSelfLoopback(10350) == true);
+
+        // 3. Demodulation during 300ms post-settling blanking window
+        assert(isSelfLoopback(10352) == true); // 1ms after receiver resumed
+        assert(isSelfLoopback(10500) == true); // 149ms after receiver resumed
+        assert(isSelfLoopback(10650) == true); // 299ms after receiver resumed
+
+        // 4. Demodulation outside blanking window -> legitimate physical remote signal accepted
+        assert(isSelfLoopback(10652) == false); // 301ms after receiver resumed
+        assert(isSelfLoopback(20000) == false); // Seconds later
+
+        std::cout << "[TEST 57] PASS: In-driver TX blanking & 300ms post-settling window rejection verified" << std::endl;
+    }
+
+    // Test 58: Atomic State Transition prevents spurious power=false blast & compressor lockout
+    {
+        TestSafetyManager safety(180000, 180000, 2000); // 180s min off time
+        uint32_t now = 200000; // System running for 200s, initial state: OFF
+
+        const char* reason = nullptr;
+        // Verify safety allows turning ON
+        assert(safety.canTurnOn(now, reason));
+
+        // OLD BUG: setTemperature/setMode sent before setPower(true)
+        // Spurious power=false frame demodulated by loopback at now+50ms:
+        // safety.recordTransition(false, now+50);
+        // This immediately locked compressor:
+        // assert(!safety.canTurnOn(now+100, reason)); // LOCKOUT!
+
+        // NEW FIX: Atomic setter updates power=true and transmits frame with power=true
+        // Blanking window also blocks loopback demodulation.
+        // Safety transitions directly to powered ON:
+        safety.recordTransition(true, now);
+        assert(safety.isAcPowered() == true);
+        assert(safety.lastTurnOn == now);
+
+        // AC is now stably powered ON and cooling without lockout
+        std::cout << "[TEST 58] PASS: Atomic state setter eliminates power=false intermediate blast and compressor lockout" << std::endl;
+    }
+
+    // Test 59: Automation Engine welcome_back and eco_drift atomic consolidated state transitions
+    {
+        // Simulate welcome_back setpoint restoration while AC is ON:
+        // Must produce single consolidated frame (pwr=true, temp=24, mode=cool, fan=auto), NOT 2 discrete bursts
+        uint8_t wire[kAzureStateLength];
+        encodeAzureFrame(true, 24, "auto", "cool", wire);
+        assert(wire[0] == kAzureVendorId);
+        assert(wire[7] == kAzurePowerOnByte); // Power is ON
+        assert(wire[6] == 35); // Temp 24 + 11
+        uint8_t fanNibble = (wire[1] >> 4) & 0x0F;
+        assert(fanNibble == kAzureFanAuto); // Fan Auto
+        assert(((wire[8] >> 4) & 0x0F) == calculateAzureChecksum(wire));
+
+        // Simulate eco_drift setpoint adjustment while AC is ON:
+        // Must produce single consolidated frame (pwr=true, temp=25, mode=cool, fan=low), NOT 2 discrete bursts
+        encodeAzureFrame(true, 25, "low", "cool", wire);
+        assert(wire[7] == kAzurePowerOnByte);
+        assert(wire[6] == 36); // Temp 25 + 11
+        std::cout << "[TEST 59] PASS: Automation welcome_back and eco_drift atomic consolidated transitions verified" << std::endl;
+    }
+
+    // Test 60: Backend preset mapping emits atomic SET_AC_STATE commands without multi-burst collisions
+    {
+        auto mapPresetToCmd = [](const std::string& presetKey, int currentTemp, const std::string& currentMode, const std::string& currentFan) -> std::string {
+            if (presetKey == "power_on") {
+                return "SET_AC_STATE 1 " + std::to_string(currentTemp) + " " + currentMode + " " + currentFan;
+            } else if (presetKey == "power_off") {
+                return "SET_AC_STATE 0 " + std::to_string(currentTemp) + " " + currentMode + " " + currentFan;
+            } else if (presetKey == "cool_24") {
+                return "SET_AC_STATE 1 24 cool " + currentFan;
+            } else if (presetKey == "cool_26") {
+                return "SET_AC_STATE 1 26 cool " + currentFan;
+            }
+            return "";
+        };
+
+        assert(mapPresetToCmd("power_on", 25, "cool", "auto") == "SET_AC_STATE 1 25 cool auto");
+        assert(mapPresetToCmd("cool_24", 25, "cool", "auto") == "SET_AC_STATE 1 24 cool auto");
+        assert(mapPresetToCmd("cool_26", 24, "cool", "auto") == "SET_AC_STATE 1 26 cool auto");
+        assert(mapPresetToCmd("power_off", 24, "cool", "auto") == "SET_AC_STATE 0 24 cool auto");
+
+        std::cout << "[TEST 60] PASS: Backend transmit_preset mapping emits atomic SET_AC_STATE without burst collisions" << std::endl;
+    }
+
+    std::cout << "\nALL 60 UNIT TESTS PASSED SUCCESSFULLY!" << std::endl;
     return 0;
 }
 

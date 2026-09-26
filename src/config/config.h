@@ -30,7 +30,7 @@ constexpr float DHT_HUMIDITY_MAX = 100.0f;
 constexpr uint8_t DHT_MAX_CONSECUTIVE_ERRORS = 5;
 
 // Watchdog Timer (in seconds)
-constexpr uint32_t WDT_TIMEOUT_SECONDS = 8;
+constexpr uint32_t WDT_TIMEOUT_SECONDS = 20;
 
 // Wi-Fi Configuration
 #ifndef WIFI_SSID

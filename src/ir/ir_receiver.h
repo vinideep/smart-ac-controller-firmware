@@ -9,6 +9,8 @@
 
 namespace ac::ir {
 
+class IRTransmitterDriver;
+
 constexpr uint16_t kCaptureBufferSize = 1024;
 constexpr uint8_t  kTimeout           = 50;  // 50ms timeout for AC multi-burst frames
 constexpr uint16_t kMinNoiseThreshold = 4;   // Filter spurious transitions / electrical noise
@@ -47,7 +49,17 @@ public:
 
     void begin();
     bool update(const String& deviceId);
+    void pause();
     void resume();
+    void enable();
+    void disable();
+    IRrecv& getIRrecv() { return _irrecv; }
+
+    void setTransmitter(IRTransmitterDriver* transmitter) { _transmitter = transmitter; }
+    void setBlankingWindow(uint32_t windowMs) { _blankingWindowMs = windowMs; }
+    void markTxBlanking(uint32_t timestampMs) { _lastTxBlankingMs = timestampMs; }
+
+    static IRReceiverDriver* getInstance() { return s_instance; }
 
     const decode_results& getLastResults() const { return _results; }
     uint32_t getCaptureCount() const { return _captureCount; }
@@ -66,6 +78,7 @@ public:
                                 const uint16_t* rawData = nullptr, uint16_t rawLength = 0);
 
 private:
+    static IRReceiverDriver* s_instance;
     uint8_t _pin;
     uint16_t _bufferSize;
     uint8_t _timeout;
@@ -74,6 +87,9 @@ private:
     uint32_t _captureCount = 0;
     bool _initialized = false;
     IRCaptureInfo _lastCapture;
+    IRTransmitterDriver* _transmitter = nullptr;
+    uint32_t _blankingWindowMs = 300;
+    uint32_t _lastTxBlankingMs = 0;
 };
 
 } // namespace ac::ir

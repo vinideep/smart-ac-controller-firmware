@@ -3,6 +3,7 @@
 #include <HTTPClient.h>
 #include <WiFiClientSecure.h>
 #include <WiFi.h>
+#include <esp_task_wdt.h>
 
 namespace ac {
 namespace cloud {
@@ -62,9 +63,11 @@ bool CloudClient::pushTelemetry(const JsonDocument& doc) {
 
     http.addHeader("Content-Type", "application/json");
     http.addHeader("Authorization", String("Bearer ") + _deviceToken);
-    http.setTimeout(5000);
+    http.setTimeout(4000);
 
+    esp_task_wdt_reset();
     int code = http.POST(body);
+    esp_task_wdt_reset();
     bool ok = (code == 200 || code == 201);
 
     if (ok) {
@@ -97,7 +100,9 @@ bool CloudClient::pollCommands() {
     http.addHeader("Authorization", String("Bearer ") + _deviceToken);
     http.setTimeout(4000);
 
+    esp_task_wdt_reset();
     int code = http.GET();
+    esp_task_wdt_reset();
 
     if (code == 200) {
         String payload = http.getString();

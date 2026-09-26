@@ -235,10 +235,16 @@ void LocalAPIServer::handleSetState() {
         return;
     }
 
-    if (!doc["power"].isNull()) _ac.setPower(doc["power"].as<bool>(), "rest_api");
-    if (!doc["temperature"].isNull()) _ac.setTemperature(doc["temperature"].as<uint8_t>(), "rest_api");
-    if (!doc["fan_speed"].isNull()) _ac.setFanSpeed(doc["fan_speed"].as<String>(), "rest_api");
-    if (!doc["mode"].isNull()) _ac.setMode(doc["mode"].as<String>(), "rest_api");
+    bool pwr = !doc["power"].isNull() ? doc["power"].as<bool>() : _ac.getState().power;
+    uint8_t temp = !doc["temperature"].isNull() ? doc["temperature"].as<uint8_t>() : _ac.getState().temperature;
+    String mode = !doc["mode"].isNull() ? doc["mode"].as<String>() : _ac.getState().mode;
+    String fan = !doc["fan_speed"].isNull() ? doc["fan_speed"].as<String>() : _ac.getState().fanSpeed;
+
+    _ac.setState(pwr, temp, mode, fan, "rest_api");
+    if (!doc["power"].isNull()) {
+        _safety.recordPowerTransition(pwr, millis());
+    }
+    _safety.recordCommandSent(millis());
 
     _server.send(200, "application/json", _ac.getState().toJSONString());
 }

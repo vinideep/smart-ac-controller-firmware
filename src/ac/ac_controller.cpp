@@ -75,6 +75,19 @@ bool AzureEssenceController::setSleep(bool sleep, const String& source) {
     return sendState(source);
 }
 
+bool AzureEssenceController::setState(bool power, uint8_t tempC, const String& mode, const String& fanSpeed, const String& source) {
+    if (!validateTemperature(tempC)) return false;
+    if (!validateMode(mode)) return false;
+    if (!validateFanSpeed(fanSpeed)) return false;
+    _state.power = power;
+    _state.temperature = tempC;
+    _state.mode = mode;
+    _state.fanSpeed = fanSpeed;
+    _state.source = source;
+    _state.timestamp = millis();
+    return sendState(source);
+}
+
 bool AzureEssenceController::sendState(const String& source) {
     _state.source = source;
     _state.timestamp = millis();
