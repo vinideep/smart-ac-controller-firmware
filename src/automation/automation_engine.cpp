@@ -1,6 +1,10 @@
 #include "automation_engine.h"
 #include <math.h>
 
+#if defined(ARDUINO_ARCH_ESP32) || defined(ESP32)
+#include <Preferences.h>
+#endif
+
 namespace ac::automation {
 
 AutomationEngine::AutomationEngine(control::ACController& ac,
@@ -9,16 +13,58 @@ AutomationEngine::AutomationEngine(control::ACController& ac,
                                    DHTDriver& dht)
     : _ac(ac), _safety(safety), _presence(presence), _dht(dht) {}
 
+void AutomationEngine::loadFromNVS() {
+#if defined(ARDUINO_ARCH_ESP32) || defined(ESP32)
+    Preferences prefs;
+    if (prefs.begin("ac_auto", true)) {
+        _config.enabled = prefs.getBool("en", _config.enabled);
+        _config.targetTemperature = prefs.getFloat("target", _config.targetTemperature);
+        _config.baseTargetTemp = prefs.getFloat("base_tgt", _config.baseTargetTemp);
+        _config.hysteresis = prefs.getFloat("hyst", _config.hysteresis);
+        _config.emptyTimeoutSeconds = prefs.getUInt("empty_s", _config.emptyTimeoutSeconds);
+        _config.ecoDriftEnabled = prefs.getBool("eco_en", _config.ecoDriftEnabled);
+        _config.ecoDriftTimeoutSeconds = prefs.getUInt("eco_s", _config.ecoDriftTimeoutSeconds);
+        _config.psychrometricEnabled = prefs.getBool("psy_en", _config.psychrometricEnabled);
+        _config.dryModeHumidityThreshold = prefs.getFloat("dry_th", _config.dryModeHumidityThreshold);
+        _config.thermalBreachProtection = prefs.getBool("breach_en", _config.thermalBreachProtection);
+        _config.presenceDetectionEnabled = prefs.getBool("pres_en", _config.presenceDetectionEnabled);
+        prefs.end();
+    }
+#endif
+}
+
+void AutomationEngine::saveToNVS() {
+#if defined(ARDUINO_ARCH_ESP32) || defined(ESP32)
+    Preferences prefs;
+    if (prefs.begin("ac_auto", false)) {
+        prefs.putBool("en", _config.enabled);
+        prefs.putFloat("target", _config.targetTemperature);
+        prefs.putFloat("base_tgt", _config.baseTargetTemp);
+        prefs.putFloat("hyst", _config.hysteresis);
+        prefs.putUInt("empty_s", _config.emptyTimeoutSeconds);
+        prefs.putBool("eco_en", _config.ecoDriftEnabled);
+        prefs.putUInt("eco_s", _config.ecoDriftTimeoutSeconds);
+        prefs.putBool("psy_en", _config.psychrometricEnabled);
+        prefs.putFloat("dry_th", _config.dryModeHumidityThreshold);
+        prefs.putBool("breach_en", _config.thermalBreachProtection);
+        prefs.putBool("pres_en", _config.presenceDetectionEnabled);
+        prefs.end();
+    }
+#endif
+}
+
 void AutomationEngine::begin() {
     _lastEvalTime = millis();
     _lastBreachSampleTime = millis();
     _breachBufCount = 0;
     _breachBufHead = 0;
     _turnedOffByVacancy = false;
+    loadFromNVS();
 }
 
 void AutomationEngine::setEnabled(bool enable) {
     _config.enabled = enable;
+    saveToNVS();
     logEvent(enable ? "automation_enabled" : "automation_disabled", "user_toggle", _dht.getLatestReading().temperature_c);
 }
 
@@ -26,39 +72,53 @@ void AutomationEngine::setTargetTemperature(float target) {
     if (target >= 16.0f && target <= 31.0f) {
         _config.targetTemperature = target;
         _config.baseTargetTemp = target;
+        saveToNVS();
     }
 }
 
 void AutomationEngine::setHysteresis(float hyst) {
     if (hyst >= 0.2f && hyst <= 5.0f) {
         _config.hysteresis = hyst;
+        saveToNVS();
     }
 }
 
 void AutomationEngine::setEmptyTimeoutSeconds(uint32_t seconds) {
     _config.emptyTimeoutSeconds = seconds;
+    saveToNVS();
 }
 
 void AutomationEngine::setEcoDriftEnabled(bool enable) {
     _config.ecoDriftEnabled = enable;
+    saveToNVS();
 }
 
 void AutomationEngine::setEcoDriftTimeoutSeconds(uint32_t seconds) {
     _config.ecoDriftTimeoutSeconds = seconds;
+    saveToNVS();
 }
 
 void AutomationEngine::setPsychrometricEnabled(bool enable) {
     _config.psychrometricEnabled = enable;
+    saveToNVS();
 }
 
 void AutomationEngine::setDryModeHumidityThreshold(float threshold) {
     if (threshold >= 40.0f && threshold <= 90.0f) {
         _config.dryModeHumidityThreshold = threshold;
+        saveToNVS();
     }
 }
 
 void AutomationEngine::setThermalBreachProtection(bool enable) {
     _config.thermalBreachProtection = enable;
+    saveToNVS();
+}
+
+void AutomationEngine::setPresenceDetectionEnabled(bool enable) {
+    _config.presenceDetectionEnabled = enable;
+    saveToNVS();
+    logEvent(enable ? "presence_guard_enabled" : "presence_guard_disabled", "config_update", _dht.getLatestReading().temperature_c);
 }
 
 void AutomationEngine::setCircadianSleep(bool enable, uint8_t pulldown, float ramp, float maxTemp) {
@@ -237,13 +297,17 @@ void AutomationEngine::update() {
     uint32_t emptyDuration = isPresent ? 0 : _presence.getDurationSeconds();
     bool acOn = _safety.isAcPowered();
     bool sleepActive = _config.sleepConfig.enabled;
-    bool effectivePresence = isPresent || sleepActive;
+    bool effectivePresence = !_config.presenceDetectionEnabled || isPresent || sleepActive;
 
     // 2. Update Circadian Sleep Engine
     evaluateCircadianSleep(now);
 
     // 3. Multi-Tier Presence & Micro-Zoning
-    if (sleepActive) {
+    if (!_config.presenceDetectionEnabled) {
+        // Presence sensor requirement disabled: continuous climate control in active tier
+        _presenceTier = PresenceTier::Active;
+        _lastPresenceState = true;
+    } else if (sleepActive) {
         // Nocturnal sleep active: occupant is present in bed (motionless); suspend vacant shutdown and eco-drift
         _presenceTier = PresenceTier::Active;
         _lastPresenceState = true;
@@ -405,6 +469,7 @@ void AutomationEngine::toJSON(JsonDocument& doc) const {
     doc["presence_tier"] = getPresenceTierStr();
     doc["sleep_stage"] = getSleepStageStr();
     doc["sleep_enabled"] = _config.sleepConfig.enabled;
+    doc["presence_detection_enabled"] = _config.presenceDetectionEnabled;
 }
 
 } // namespace ac::automation

@@ -156,6 +156,7 @@ void TelemetryManager::printReadingJSON(const DHTReading& reading,
     doc["sleep_stage"] = autoEngine.getSleepStageStr();
     doc["sleep_enabled"] = autoEngine.isCircadianSleepEnabled();
     doc["auto_enabled"] = autoEngine.isEnabled();
+    doc["presence_detection_enabled"] = autoEngine.isPresenceDetectionEnabled();
     doc["thermal_breach"] = autoEngine.isThermalBreachActive();
     doc["thermal_breach_delta"] = autoEngine.getThermalBreachDelta();
 

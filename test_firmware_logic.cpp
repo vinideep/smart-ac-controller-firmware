@@ -390,14 +390,17 @@ public:
     float targetTemperature = 25.0f;
     float hysteresis = 1.0f;
     uint32_t emptyTimeoutSeconds = 900;
+    bool presenceDetectionEnabled = true;
 
     enum Action { NONE, TURN_ON, TURN_OFF };
 
     Action evaluate(bool acOn, bool isPresent, uint32_t emptyDurationSec, float currentTemp, uint32_t now, const TestSafetyManager& safety) {
         if (!enabled) return NONE;
 
-        // Rule 1: Empty room safety turn-off
-        if (acOn && !isPresent && emptyDurationSec >= emptyTimeoutSeconds) {
+        bool effectivePresence = !presenceDetectionEnabled || isPresent;
+
+        // Rule 1: Empty room safety turn-off (enforced only when presence detection is enabled)
+        if (presenceDetectionEnabled && acOn && !isPresent && emptyDurationSec >= emptyTimeoutSeconds) {
             const char* reason = nullptr;
             if (safety.canTurnOff(now, reason)) {
                 return TURN_OFF;
@@ -405,8 +408,8 @@ public:
             return NONE;
         }
 
-        // Rule 2: Occupied room cooling trigger
-        if (!acOn && isPresent && currentTemp > (targetTemperature + hysteresis)) {
+        // Rule 2: Cooling trigger
+        if (!acOn && effectivePresence && currentTemp > (targetTemperature + hysteresis)) {
             const char* reason = nullptr;
             if (safety.canTurnOn(now, reason)) {
                 return TURN_ON;
@@ -415,7 +418,7 @@ public:
         }
 
         // Rule 3: Target reached in cooling mode
-        if (acOn && isPresent && currentTemp < (targetTemperature - hysteresis)) {
+        if (acOn && effectivePresence && currentTemp < (targetTemperature - hysteresis)) {
             const char* reason = nullptr;
             if (safety.canTurnOff(now, reason)) {
                 return TURN_OFF;
@@ -445,6 +448,7 @@ public:
     bool thermalBreachProtection = true;
     float breachRiseThreshold = 1.2f;
     uint32_t breachWindowMs = 180000;
+    bool presenceDetectionEnabled = true;
 
     // Sleep config
     bool sleepEnabled = false;
@@ -545,10 +549,13 @@ public:
 
         evaluateSleep(now);
         float apparentTemp = psychrometricEnabled ? heatIndex : currentTemp;
-        bool effectivePresence = isPresent || sleepEnabled;
+        bool effectivePresence = !presenceDetectionEnabled || isPresent || sleepEnabled;
 
         // Presence & Micro-zoning
-        if (sleepEnabled) {
+        if (!presenceDetectionEnabled) {
+            presenceTier = TIER_ACTIVE;
+            lastPresenceState = true;
+        } else if (sleepEnabled) {
             presenceTier = TIER_ACTIVE;
             lastPresenceState = true;
         } else if (isPresent) {
@@ -1406,7 +1413,31 @@ int main() {
         std::cout << "[TEST 54] PASS: Serial Digital Twin full telemetry schema completeness validated" << std::endl;
     }
 
-    std::cout << "\nALL 54 UNIT TESTS PASSED SUCCESSFULLY!" << std::endl;
+    // Test 55: Continuous thermal automation engages cooling even when human presence sensor is not installed (presenceDetectionEnabled == false)
+    {
+        TestAutomationEngine autoEngine;
+        TestSafetyManager autoSafety;
+        autoEngine.enabled = true;
+        autoEngine.targetTemperature = 25.0f;
+        autoEngine.hysteresis = 1.0f;
+        autoEngine.presenceDetectionEnabled = false; // Sensor not installed or presence guard disabled
+
+        // Scenario 1: Room unoccupied (isPresent = false), temp = 26.5C (> 25 + 1 = 26C) -> MUST trigger cooling ON
+        auto action = autoEngine.evaluate(false, false, 3600, 26.5f, 10000, autoSafety);
+        assert(action == TestAutomationEngine::TURN_ON);
+        autoSafety.recordTransition(true, 10000);
+
+        // Scenario 2: Unoccupied for 30 minutes (> emptyTimeoutSeconds), but presenceDetectionEnabled is false -> MUST NOT turn off for vacancy
+        action = autoEngine.evaluate(true, false, 1800, 25.5f, 200000, autoSafety);
+        assert(action == TestAutomationEngine::NONE);
+
+        // Scenario 3: Temperature drops below comfort cutoff (< 25 - 1 = 24C) -> MUST turn off
+        action = autoEngine.evaluate(true, false, 2000, 23.8f, 250000, autoSafety);
+        assert(action == TestAutomationEngine::TURN_OFF);
+        std::cout << "[TEST 55] PASS: Continuous thermal automation engages cooling without presence sensor requirement" << std::endl;
+    }
+
+    std::cout << "\nALL 55 UNIT TESTS PASSED SUCCESSFULLY!" << std::endl;
     return 0;
 }
 

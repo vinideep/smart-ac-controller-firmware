@@ -161,6 +161,7 @@ void processCommand(const String& rawCmd) {
                 if (!doc["psychrometric_enabled"].isNull()) automationEngine.setPsychrometricEnabled(doc["psychrometric_enabled"].as<bool>());
                 if (!doc["dry_mode_humidity_threshold"].isNull()) automationEngine.setDryModeHumidityThreshold(doc["dry_mode_humidity_threshold"].as<float>());
                 if (!doc["thermal_breach_protection"].isNull()) automationEngine.setThermalBreachProtection(doc["thermal_breach_protection"].as<bool>());
+                if (!doc["presence_detection_enabled"].isNull()) automationEngine.setPresenceDetectionEnabled(doc["presence_detection_enabled"].as<bool>());
                 if (!doc["sleep_enabled"].isNull()) {
                     automationEngine.setCircadianSleep(doc["sleep_enabled"].as<bool>(), doc["pulldown_temp"] | 23, doc["ramp_rate"] | 0.5f, doc["max_temp"] | 25.5f);
                 }
@@ -486,6 +487,7 @@ void loop() {
         cloudDoc["eco_drift_enabled"] = automationEngine.isEcoDriftEnabled();
         cloudDoc["psychrometric_enabled"] = automationEngine.isPsychrometricEnabled();
         cloudDoc["auto_enabled"] = automationEngine.isEnabled();
+        cloudDoc["presence_detection_enabled"] = automationEngine.isPresenceDetectionEnabled();
         cloudDoc["ir_tx_installed"] = HAS_IR_TRANSMITTER;
         cloudDoc["ir_rx_installed"] = true;
         cloudDoc["dht22_installed"] = true;

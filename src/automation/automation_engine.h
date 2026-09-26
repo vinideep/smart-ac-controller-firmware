@@ -47,6 +47,7 @@ struct AutomationConfig {
     bool thermalBreachProtection = true;
     float breachRiseThreshold = 1.2f;
     uint32_t breachWindowMs = 180000;         // 3 minutes (180s)
+    bool presenceDetectionEnabled = false;    // When false, regulates climate without waiting for presence sensor
 
     CircadianSleepConfig sleepConfig;
 };
@@ -101,6 +102,12 @@ public:
         _breachBufCount = 0;
         _breachBufHead = 0;
     }
+
+    void setPresenceDetectionEnabled(bool enable);
+    bool isPresenceDetectionEnabled() const { return _config.presenceDetectionEnabled; }
+
+    void loadFromNVS();
+    void saveToNVS();
 
     void setCircadianSleep(bool enable, uint8_t pulldown = 23, float ramp = 0.5f, float maxTemp = 25.5f);
     bool isCircadianSleepEnabled() const { return _config.sleepConfig.enabled; }
