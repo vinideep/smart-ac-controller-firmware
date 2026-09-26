@@ -14,10 +14,13 @@ struct PresenceReading {
 
 class PresenceSensorDriver {
 public:
-    explicit PresenceSensorDriver(uint8_t pin, bool activeLow = true);
+    explicit PresenceSensorDriver(uint8_t pin, bool activeLow = false);
 
     void begin();
     bool update();
+
+    void setActiveLow(bool activeLow);
+    bool isActiveLow() const { return _activeLow; }
 
     const PresenceReading& getReading() const { return _reading; }
     bool isPresent() const { return _reading.present; }

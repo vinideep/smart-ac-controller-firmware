@@ -45,3 +45,11 @@
 #ifndef IR_OBSTACLE_PIN
 #define IR_OBSTACLE_PIN 26
 #endif
+
+#ifndef PRESENCE_PIN
+#define PRESENCE_PIN 26
+#endif
+
+#ifndef PRESENCE_ACTIVE_LOW
+#define PRESENCE_ACTIVE_LOW false // Default Active HIGH for radar/mmWave sensors (e.g. RCWL-0516, HLK-LD2410)
+#endif

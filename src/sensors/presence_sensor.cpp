@@ -7,10 +7,17 @@ PresenceSensorDriver::PresenceSensorDriver(uint8_t pin, bool activeLow)
 
 void PresenceSensorDriver::begin() {
     if (!_initialized) {
-        pinMode(_pin, _activeLow ? INPUT_PULLUP : INPUT);
+        pinMode(_pin, _activeLow ? INPUT_PULLUP : INPUT_PULLDOWN);
         _stateStartTime = millis();
         _reading.last_seen_ms = millis();
         _initialized = true;
+    }
+}
+
+void PresenceSensorDriver::setActiveLow(bool activeLow) {
+    _activeLow = activeLow;
+    if (_initialized) {
+        pinMode(_pin, _activeLow ? INPUT_PULLUP : INPUT_PULLDOWN);
     }
 }
 

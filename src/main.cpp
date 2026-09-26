@@ -17,7 +17,7 @@
 
 // Hardware driver and subsystem instances (All 9 Phases)
 DHTDriver dhtDriver(DHT_PIN, DHT_TYPE);
-ac::sensors::PresenceSensorDriver presenceSensor(IR_OBSTACLE_PIN);
+ac::sensors::PresenceSensorDriver presenceSensor(PRESENCE_PIN, PRESENCE_ACTIVE_LOW);
 ac::sensors::EnergyMonitor energyMonitor(8.0f, 230.0f); // Configurable tariff ₹8.0/kWh, nominal 230V
 ac::ir::IRReceiverDriver irReceiver(IR_RX_PIN, ac::ir::kCaptureBufferSize, ac::ir::kTimeout);
 ac::control::AzureEssenceController acController(IR_TX_PIN);
@@ -85,11 +85,12 @@ void setup() {
 
     // 7. Print boot banner and device information
     TelemetryManager::printDeviceInfo(deviceId);
-    Serial.printf("[SYSTEM] IR Transmitter active on GPIO %d\n", IR_TX_PIN);
-    Serial.printf("[SYSTEM] Presence/Obstacle sensor active on GPIO %d\n", IR_OBSTACLE_PIN);
+    Serial.printf("[SYSTEM] IR Transmitter active on GPIO %d (Status: %s)\n", IR_TX_PIN, HAS_IR_TRANSMITTER ? "ENABLED" : "DISABLED");
+    Serial.printf("[SYSTEM] Radar Presence sensor active on GPIO %d (Active %s, Status: %s)\n",
+                  PRESENCE_PIN, PRESENCE_ACTIVE_LOW ? "LOW" : "HIGH", HAS_PRESENCE_SENSOR ? "ENABLED" : "DISABLED");
     Serial.printf("[SYSTEM] Energy Monitor active (Nominal: %.0fV, Tariff: %.2f/kWh)\n",
                   energyMonitor.getNominalVoltage(), energyMonitor.getTariff());
-    Serial.println("[SYSTEM] Ready. Commands: POWER_ON, POWER_OFF, SET_TEMP <16-31>, SET_MODE <COOL|DRY|FAN|AUTO>, SET_FAN <AUTO|MED|HIGH>, AUTO_ON, AUTO_OFF, GET_STATE, GET_PRESENCE, GET_ENERGY, SET_TARIFF <rate>, TEST_TX");
+    Serial.println("[SYSTEM] Ready. Commands: POWER_ON, POWER_OFF, SET_TEMP <16-31>, SET_MODE <COOL|DRY|FAN|AUTO>, SET_FAN <AUTO|MED|HIGH>, AUTO_ON, AUTO_OFF, GET_STATE, GET_PRESENCE, GET_ENERGY, SET_TARIFF <rate>, SET_PRESENCE_POLARITY <HIGH|LOW>, TEST_TX");
 
     // Visual boot indication (double blink)
     for (int i = 0; i < 2; i++) {
@@ -192,6 +193,10 @@ void processCommand(const String& rawCmd) {
                     digitalWrite(STATUS_LED_PIN, LOW);
                     Serial.printf("[CMD_OK] Transmitted %u raw transitions at %ukHz\n", len, freq);
                 }
+            } else if (strcmp(commandType, "presence_polarity") == 0) {
+                bool activeLow = doc["active_low"] | false;
+                presenceSensor.setActiveLow(activeLow);
+                Serial.printf("[CMD_OK] Presence sensor polarity set to Active-%s\n", activeLow ? "LOW" : "HIGH");
             }
             return;
         }
@@ -338,6 +343,18 @@ void processCommand(const String& rawCmd) {
             }
         } else {
             Serial.println("[CMD_ERR] Usage: SET_TARIFF <rate>");
+        }
+    } else if (upper.startsWith("SET_PRESENCE_POLARITY")) {
+        int spaceIdx = upper.indexOf(' ');
+        if (spaceIdx > 0) {
+            String pol = upper.substring(spaceIdx + 1);
+            pol.trim();
+            pol.toUpperCase();
+            bool activeLow = (pol == "LOW" || pol == "ACTIVE_LOW" || pol == "TRUE" || pol == "1");
+            presenceSensor.setActiveLow(activeLow);
+            Serial.printf("[CMD_OK] Presence sensor polarity set to Active-%s\n", activeLow ? "LOW" : "HIGH");
+        } else {
+            Serial.println("[CMD_ERR] Usage: SET_PRESENCE_POLARITY <HIGH|LOW>");
         }
     } else if (upper == "TEST_TX") {
         digitalWrite(STATUS_LED_PIN, HIGH);

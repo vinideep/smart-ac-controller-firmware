@@ -61,11 +61,11 @@ constexpr uint32_t WDT_TIMEOUT_SECONDS = 8;
 
 // Hardware Module Attachment Flags
 #ifndef HAS_PRESENCE_SENSOR
-#define HAS_PRESENCE_SENSOR false
+#define HAS_PRESENCE_SENSOR true
 #endif
 
 #ifndef HAS_IR_TRANSMITTER
-#define HAS_IR_TRANSMITTER false
+#define HAS_IR_TRANSMITTER true
 #endif
 
 // How often ESP32 pushes telemetry to backend (milliseconds)
