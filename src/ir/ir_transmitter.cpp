@@ -17,7 +17,8 @@ bool IRTransmitterDriver::sendRaw(const uint16_t* rawData, uint16_t length, uint
     if (!_initialized) begin();
     if (rawData == nullptr || length == 0) return false;
 
-    _irsend.sendRaw(rawData, length, freqKhz);
+    uint16_t freqHz = (freqKhz < 1000) ? (freqKhz * 1000) : freqKhz;
+    _irsend.sendRaw(rawData, length, freqHz);
     _txCount++;
     logTransmission("send_raw", true);
     return true;
@@ -30,13 +31,13 @@ bool IRTransmitterDriver::sendProtocol(const uint8_t stateBytes[kAzureStateLengt
     uint16_t count = AzureEssenceProtocol::generateRaw(stateBytes, rawBuf, kAzureRawTransitions);
     if (count == 0) return false;
 
-    // First transmission
-    _irsend.sendRaw(rawBuf, count, 38);
+    // First transmission at 38kHz (38000Hz)
+    _irsend.sendRaw(rawBuf, count, kAzureCarrierFreq);
 
     // Any repeat frames separated by 21ms gap
     for (uint16_t r = 0; r < repeats; r++) {
         delay(kAzureRepeatSpace / 1000);
-        _irsend.sendRaw(rawBuf, count, 38);
+        _irsend.sendRaw(rawBuf, count, kAzureCarrierFreq);
     }
 
     _txCount++;

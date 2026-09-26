@@ -391,7 +391,7 @@ void loop() {
                 serializeJson(syncDoc, Serial);
                 Serial.println();
                 if (cloudClient.isEnabled()) {
-                    cloudClient.update(syncDoc);
+                    cloudClient.pushTelemetry(syncDoc);
                 }
             }
             JsonDocument irDoc;
@@ -417,7 +417,7 @@ void loop() {
             serializeJson(irDoc, Serial);
             Serial.println();
             if (cloudClient.isEnabled()) {
-                cloudClient.update(irDoc);
+                cloudClient.pushTelemetry(irDoc);
             }
             irReceiver.clearLastCapture();
         }
@@ -434,6 +434,9 @@ void loop() {
         String out;
         serializeJson(doc, out);
         Serial.println(out);
+        if (cloudClient.isEnabled()) {
+            cloudClient.pushTelemetry(doc);
+        }
     }
 #endif
 
@@ -524,7 +527,7 @@ void loop() {
             cloudDoc["temperature"] = acController.getState().temperature;
             cloudDoc["mode"] = acController.getState().mode;
             cloudDoc["fan_speed"] = acController.getState().fanSpeed;
-            cloudClient.update(cloudDoc);
+            cloudClient.pushTelemetry(cloudDoc);
         }
     }
 

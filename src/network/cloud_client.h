@@ -62,8 +62,11 @@ public:
     /** Returns timestamp_ms of last successful telemetry push (0 = never). */
     unsigned long lastPushMs() const { return _lastPushMs; }
 
-    /** Returns timestamp_ms of last successful command poll (0 = never). */
-    unsigned long lastPollMs() const { return _lastPollMs; }
+    /**
+     * @brief Immediately push a JSON document (telemetry, ir_capture, presence_event) to the backend.
+     * Bypasses the periodic CLOUD_TELEMETRY_INTERVAL_MS timer.
+     */
+    bool pushTelemetry(const JsonDocument& doc);
 
 private:
     const char* _backendUrl;
@@ -82,7 +85,6 @@ private:
     uint8_t _qCount = 0;
 
     void enqueue(const String& cmd);
-    bool pushTelemetry(const JsonDocument& doc);
     bool pollCommands();
 };
 
