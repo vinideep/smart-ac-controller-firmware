@@ -17,7 +17,7 @@
 
 // Hardware driver and subsystem instances (All 9 Phases)
 DHTDriver dhtDriver(DHT_PIN, DHT_TYPE);
-ac::sensors::PresenceSensorDriver presenceSensor(PRESENCE_PIN, PRESENCE_ACTIVE_LOW);
+ac::sensors::PresenceSensorDriver presenceSensor(PRESENCE_PIN, PRESENCE_ACTIVE_LOW, RADAR_RX_PIN, RADAR_TX_PIN, RADAR_BAUD_RATE);
 ac::sensors::EnergyMonitor energyMonitor(8.0f, 230.0f); // Configurable tariff ₹8.0/kWh, nominal 230V
 ac::ir::IRReceiverDriver irReceiver(IR_RX_PIN, ac::ir::kCaptureBufferSize, ac::ir::kTimeout);
 ac::control::AzureEssenceController acController(IR_TX_PIN);
@@ -410,6 +410,8 @@ void processCommand(const String& rawCmd) {
         String out;
         serializeJson(doc, out);
         Serial.println(out);
+    } else if (upper == "GET_RADAR_DEBUG") {
+        presenceSensor.printDebug(Serial);
     } else if (upper == "GET_AUTO") {
         JsonDocument doc;
         automationEngine.toJSON(doc);
@@ -598,6 +600,11 @@ void loop() {
         cloudDoc["fan_speed"] = acController.getState().fanSpeed;
         cloudDoc["presence"] = HAS_PRESENCE_SENSOR ? presenceSensor.isPresent() : false;
         cloudDoc["presence_installed"] = HAS_PRESENCE_SENSOR;
+        cloudDoc["distance_m"] = presenceSensor.getDistanceM();
+        cloudDoc["target_count"] = presenceSensor.getTargetCount();
+        cloudDoc["motion_state"] = presenceSensor.getMotionState();
+        cloudDoc["radar_uart_active"] = presenceSensor.isUartActive();
+        cloudDoc["radar_uart_bytes"] = presenceSensor.getUartBytesReceived();
         cloudDoc["presence_tier"] = automationEngine.getPresenceTierStr();
         cloudDoc["sleep_stage"] = automationEngine.getSleepStageStr();
         cloudDoc["sleep_enabled"] = automationEngine.isCircadianSleepEnabled();

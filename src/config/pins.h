@@ -53,3 +53,16 @@
 #ifndef PRESENCE_ACTIVE_LOW
 #define PRESENCE_ACTIVE_LOW false // Default Active HIGH for radar/mmWave sensors (e.g. RCWL-0516, HLK-LD2410)
 #endif
+
+#ifndef RADAR_RX_PIN
+#define RADAR_RX_PIN 16 // ESP32 RX2 (connect to Radar TX)
+#endif
+
+#ifndef RADAR_TX_PIN
+#define RADAR_TX_PIN 17 // ESP32 TX2 (connect to Radar RX)
+#endif
+
+#ifndef RADAR_BAUD_RATE
+#define RADAR_BAUD_RATE 115200
+#endif
+
