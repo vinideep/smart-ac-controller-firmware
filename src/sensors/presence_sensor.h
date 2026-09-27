@@ -37,6 +37,8 @@ public:
     const char* getMotionState() const { return _reading.motion_state; }
     bool isUartActive() const { return (_lastUartFrameTime > 0 && (millis() - _lastUartFrameTime < 2500)); }
     uint32_t getUartBytesReceived() const { return _totalUartBytes; }
+    uint8_t getMovingEnergy() const { return _reading.moving_energy; }
+    uint8_t getStationaryEnergy() const { return _reading.stationary_energy; }
     void printDebug(Print& out);
 
     void toJSON(JsonDocument& doc) const;

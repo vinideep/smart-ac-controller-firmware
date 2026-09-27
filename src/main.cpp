@@ -614,6 +614,14 @@ void loop() {
         cloudDoc["psychrometric_enabled"] = automationEngine.isPsychrometricEnabled();
         cloudDoc["auto_enabled"] = automationEngine.isEnabled();
         cloudDoc["presence_detection_enabled"] = automationEngine.isPresenceDetectionEnabled();
+        cloudDoc["moving_energy"] = presenceSensor.getMovingEnergy();
+        cloudDoc["stationary_energy"] = presenceSensor.getStationaryEnergy();
+        cloudDoc["power_watts"] = energyMonitor.getPowerWatts();
+        cloudDoc["voltage"] = energyMonitor.getVoltage();
+        cloudDoc["current"] = energyMonitor.getCurrent();
+        cloudDoc["energy_kwh_today"] = energyMonitor.getEnergyKwhToday();
+        cloudDoc["estimated_cost_today"] = energyMonitor.getEstimatedCostToday();
+        cloudDoc["tariff_rate"] = energyMonitor.getTariff();
         cloudDoc["ir_tx_installed"] = HAS_IR_TRANSMITTER;
         cloudDoc["ir_rx_installed"] = true;
         cloudDoc["dht22_installed"] = true;
