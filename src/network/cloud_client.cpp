@@ -63,7 +63,8 @@ bool CloudClient::pushTelemetry(const JsonDocument& doc) {
 
     http.addHeader("Content-Type", "application/json");
     http.addHeader("Authorization", String("Bearer ") + _deviceToken);
-    http.setTimeout(4000);
+    http.setTimeout(1500);
+    http.setReuse(true);
 
     esp_task_wdt_reset();
     int code = http.POST(body);
@@ -73,6 +74,25 @@ bool CloudClient::pushTelemetry(const JsonDocument& doc) {
     if (ok) {
         _lastPushMs = millis();
         Serial.println("[CLOUD] Telemetry pushed to server (HTTP OK)");
+
+        // Immediately check response for piggybacked pending commands
+        String payload = http.getString();
+        JsonDocument resp;
+        if (deserializeJson(resp, payload) == DeserializationError::Ok) {
+            JsonArray cmds = resp["commands"].as<JsonArray>();
+            int count = 0;
+            for (JsonVariant v : cmds) {
+                String cmdStr = v.as<String>();
+                cmdStr.trim();
+                if (cmdStr.length() > 0) {
+                    enqueue(cmdStr);
+                    count++;
+                }
+            }
+            if (count > 0) {
+                Serial.printf("[CLOUD] Instant piggyback command received: %d\n", count);
+            }
+        }
     } else if (code > 0) {
         Serial.printf("[CLOUD_WARN] Telemetry push failed: HTTP %d\n", code);
     } else {
@@ -91,14 +111,15 @@ bool CloudClient::pollCommands() {
 
     if (url.startsWith("https://")) {
         secureClient.setInsecure();
-        secureClient.setHandshakeTimeout(10);
+        secureClient.setHandshakeTimeout(6);
         http.begin(secureClient, url);
     } else {
         http.begin(url);
     }
 
     http.addHeader("Authorization", String("Bearer ") + _deviceToken);
-    http.setTimeout(4000);
+    http.setTimeout(1500);
+    http.setReuse(true);
 
     esp_task_wdt_reset();
     int code = http.GET();

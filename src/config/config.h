@@ -69,8 +69,8 @@ constexpr uint32_t WDT_TIMEOUT_SECONDS = 20;
 #endif
 
 // How often ESP32 pushes telemetry to backend (milliseconds)
-constexpr uint32_t CLOUD_TELEMETRY_INTERVAL_MS = 3000;
+constexpr uint32_t CLOUD_TELEMETRY_INTERVAL_MS = 2000;
 
-// How often ESP32 polls backend for pending commands (milliseconds)
-constexpr uint32_t CLOUD_POLL_INTERVAL_MS = 2000;
+// Fast command polling (milliseconds) — reduced from 2000ms to 400ms for instantaneous IR trigger
+constexpr uint32_t CLOUD_POLL_INTERVAL_MS = 400;
 

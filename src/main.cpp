@@ -625,6 +625,7 @@ void loop() {
         cloudDoc["ir_tx_installed"] = HAS_IR_TRANSMITTER;
         cloudDoc["ir_rx_installed"] = true;
         cloudDoc["dht22_installed"] = true;
+        cloudDoc["local_ip"] = WiFi.localIP().toString();
         cloudDoc["timestamp_ms"] = millis();
 
         cloudClient.update(cloudDoc);
