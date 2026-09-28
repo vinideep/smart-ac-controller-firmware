@@ -168,10 +168,52 @@ void EnergyMonitor::updateFromAcState(bool isPowered,
     _reading.current = _reading.power_watts / (_reading.voltage * _reading.power_factor);
 }
 
+bool EnergyMonitor::sampleAdcCurrent(uint8_t pin, float calibration) {
+    uint32_t startMs = millis();
+    int adcMax = 0;
+    int adcMin = 4095;
+
+    while (millis() - startMs < 30) {
+        int val = analogRead(pin);
+        if (val > adcMax) adcMax = val;
+        if (val < adcMin) adcMin = val;
+        delayMicroseconds(250);
+    }
+
+    int midPoint = (adcMax + adcMin) / 2;
+    startMs = millis();
+    uint32_t sampleCount = 0;
+    double sumSquared = 0.0;
+
+    while (millis() - startMs < 40) {
+        int val = analogRead(pin);
+        double diff = static_cast<double>(val - midPoint);
+        sumSquared += (diff * diff);
+        sampleCount++;
+        delayMicroseconds(250);
+    }
+
+    if (sampleCount == 0) return false;
+
+    double meanSquared = sumSquared / sampleCount;
+    double vRms = (sqrt(meanSquared) / 4095.0) * 3.3; // 3.3V ADC reference
+    float currentRms = static_cast<float>(vRms * calibration);
+
+    if (currentRms < 0.05f) currentRms = 0.015f; // Zero-noise floor threshold
+
+    float activeWatts = currentRms * _nominalVoltage * _reading.power_factor;
+    _hardwareSensorActive = true;
+    updateMeasurement(_nominalVoltage, currentRms, activeWatts, _reading.power_factor,
+                      (activeWatts >= 250.0f) ? "cooling" : (activeWatts >= 20.0f ? "fan_only" : "standby"));
+    return true;
+}
+
 void EnergyMonitor::toJSON(JsonDocument& doc) const {
     doc["voltage"] = round(_reading.voltage * 10.0f) / 10.0f;
     doc["current"] = round(_reading.current * 100.0f) / 100.0f;
     doc["power_watts"] = round(_reading.power_watts * 10.0f) / 10.0f;
+    doc["power_tier"] = getPowerTierStr();
+    doc["hardware_meter"] = _hardwareSensorActive;
     doc["power_factor"] = round(_reading.power_factor * 100.0f) / 100.0f;
     doc["energy_kwh_today"] = round(_reading.energy_kwh_today * 10000.0f) / 10000.0f;
     doc["tariff_rate"] = round(_reading.tariff_rate * 100.0f) / 100.0f;

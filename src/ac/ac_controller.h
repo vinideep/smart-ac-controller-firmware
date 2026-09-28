@@ -49,6 +49,8 @@ public:
     bool sendState(const String& source = "user") override;
 
     void applyExternalState(const ACState& newState);
+    void applyExternalPower(bool power);
+    void restoreStateFromStorage();
 
     // Minimum and maximum validated temperature range
     static constexpr uint8_t kMinTemperature = 16;

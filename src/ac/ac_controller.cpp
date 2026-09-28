@@ -1,4 +1,5 @@
 #include "ac_controller.h"
+#include "../storage/storage_manager.h"
 
 namespace ac::control {
 
@@ -16,6 +17,14 @@ AzureEssenceController::AzureEssenceController(uint8_t txPin)
 
 void AzureEssenceController::begin() {
     _transmitter.begin();
+    restoreStateFromStorage();
+}
+
+void AzureEssenceController::restoreStateFromStorage() {
+    if (storage::StorageManager::loadAcState(_state)) {
+        Serial.printf("[NVS] Restored AC state: Power=%s Temp=%dC Mode=%s Fan=%s\n",
+                      _state.power ? "ON" : "OFF", _state.temperature, _state.mode.c_str(), _state.fanSpeed.c_str());
+    }
 }
 
 bool AzureEssenceController::validateTemperature(uint8_t tempC) const {
@@ -91,6 +100,7 @@ bool AzureEssenceController::setState(bool power, uint8_t tempC, const String& m
 bool AzureEssenceController::sendState(const String& source) {
     _state.source = source;
     _state.timestamp = millis();
+    storage::StorageManager::saveAcState(_state);
     // Transmit with 1 repeat frame for guaranteed reception
     return _transmitter.sendAcState(_state, 1);
 }
@@ -102,8 +112,18 @@ void AzureEssenceController::applyExternalState(const ACState& newState) {
     _state.fanSpeed = newState.fanSpeed;
     _state.source = "ir_remote";
     _state.timestamp = millis();
+    storage::StorageManager::saveAcState(_state);
     Serial.printf("[AC_MIRROR] State updated from remote IR: Power=%s Temp=%dC Mode=%s Fan=%s\n",
                   _state.power ? "ON" : "OFF", _state.temperature, _state.mode.c_str(), _state.fanSpeed.c_str());
+}
+
+void AzureEssenceController::applyExternalPower(bool power) {
+    _state.power = power;
+    _state.source = "closed_loop_sync";
+    _state.timestamp = millis();
+    storage::StorageManager::saveAcState(_state);
+    Serial.printf("[AC_MIRROR] Power state synchronized from electrical draw: Power=%s\n",
+                  _state.power ? "ON" : "OFF");
 }
 
 } // namespace ac::control

@@ -43,6 +43,9 @@ private:
     void handleSetTemperature();
     void handleSetFan();
     void handleSetMode();
+    void handleWifiScan();
+    void handleWifiConfigure();
+    void handleWifiStatus();
 };
 
 } // namespace ac::api

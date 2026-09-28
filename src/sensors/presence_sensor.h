@@ -39,8 +39,21 @@ public:
     uint32_t getUartBytesReceived() const { return _totalUartBytes; }
     uint8_t getMovingEnergy() const { return _reading.moving_energy; }
     uint8_t getStationaryEnergy() const { return _reading.stationary_energy; }
-    void printDebug(Print& out);
 
+    // Zone Gating & Asymmetric Debounce Controls
+    void setDistanceGates(float minM, float maxM);
+    float getMinDistanceM() const { return _minDistanceM; }
+    float getMaxDistanceM() const { return _maxDistanceM; }
+
+    void setEnergyThresholds(uint8_t minMoveEnergy, uint8_t minStatEnergy);
+    uint8_t getMinMovingEnergy() const { return _minMovingEnergy; }
+    uint8_t getMinStationaryEnergy() const { return _minStationaryEnergy; }
+
+    void setAbsenceTimeoutSeconds(uint32_t seconds);
+    uint32_t getAbsenceTimeoutSeconds() const { return _absenceTimeoutMs / 1000; }
+    bool isRawInZoneDetected() const { return _rawInZoneDetected; }
+
+    void printDebug(Print& out);
     void toJSON(JsonDocument& doc) const;
 
 private:
@@ -60,6 +73,17 @@ private:
     uint32_t _totalUartBytes = 0;
     uint8_t _debounceCount = 0;
     bool _rawState = false;
+
+    // Zone Gating Configuration
+    float _minDistanceM = 0.2f;
+    float _maxDistanceM = 4.5f;
+    uint8_t _minMovingEnergy = 15;
+    uint8_t _minStationaryEnergy = 15;
+
+    // Asymmetric Debounce
+    uint32_t _absenceTimeoutMs = 600000; // 10 minutes default (600s)
+    uint32_t _lastPresenceDetectedMs = 0;
+    bool _rawInZoneDetected = false;
 
     uint8_t _rxBuf[128];
     size_t _rxLen = 0;

@@ -25,6 +25,7 @@ void AutomationEngine::loadFromNVS() {
         _config.ecoDriftEnabled = prefs.getBool("eco_en", _config.ecoDriftEnabled);
         _config.ecoDriftTimeoutSeconds = prefs.getUInt("eco_s", _config.ecoDriftTimeoutSeconds);
         _config.psychrometricEnabled = prefs.getBool("psy_en", _config.psychrometricEnabled);
+        _config.comfortIndexOptimization = prefs.getBool("comf_en", _config.comfortIndexOptimization);
         _config.dryModeHumidityThreshold = prefs.getFloat("dry_th", _config.dryModeHumidityThreshold);
         _config.thermalBreachProtection = prefs.getBool("breach_en", _config.thermalBreachProtection);
         _config.presenceDetectionEnabled = prefs.getBool("pres_en", _config.presenceDetectionEnabled);
@@ -45,6 +46,7 @@ void AutomationEngine::saveToNVS() {
         prefs.putBool("eco_en", _config.ecoDriftEnabled);
         prefs.putUInt("eco_s", _config.ecoDriftTimeoutSeconds);
         prefs.putBool("psy_en", _config.psychrometricEnabled);
+        prefs.putBool("comf_en", _config.comfortIndexOptimization);
         prefs.putFloat("dry_th", _config.dryModeHumidityThreshold);
         prefs.putBool("breach_en", _config.thermalBreachProtection);
         prefs.putBool("pres_en", _config.presenceDetectionEnabled);
@@ -100,6 +102,11 @@ void AutomationEngine::setEcoDriftTimeoutSeconds(uint32_t seconds) {
 
 void AutomationEngine::setPsychrometricEnabled(bool enable) {
     _config.psychrometricEnabled = enable;
+    saveToNVS();
+}
+
+void AutomationEngine::setComfortIndexOptimization(bool enable) {
+    _config.comfortIndexOptimization = enable;
     saveToNVS();
 }
 
@@ -462,6 +469,7 @@ void AutomationEngine::toJSON(JsonDocument& doc) const {
     doc["sleep_stage"] = getSleepStageStr();
     doc["sleep_enabled"] = _config.sleepConfig.enabled;
     doc["presence_detection_enabled"] = _config.presenceDetectionEnabled;
+    doc["comfort_index_optimization"] = _config.comfortIndexOptimization;
 }
 
 } // namespace ac::automation

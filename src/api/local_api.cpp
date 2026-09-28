@@ -33,14 +33,37 @@ void LocalAPIServer::sendCORS() {
 }
 
 void LocalAPIServer::setupRoutes() {
-    // CORS Preflight
+    // Captive Portal Detection URLs (Android, iOS, Windows, ChromeOS)
+    auto captiveHandler = [this]() {
+        if (_network.isAPMode()) {
+            _server.sendHeader("Location", "http://192.168.4.1/", true);
+            _server.send(302, "text/plain", "");
+        } else {
+            _server.send(204);
+        }
+    };
+    _server.on("/generate_204", HTTP_GET, captiveHandler);
+    _server.on("/gen_204", HTTP_GET, captiveHandler);
+    _server.on("/hotspot-detect.html", HTTP_GET, captiveHandler);
+    _server.on("/canonical.html", HTTP_GET, captiveHandler);
+    _server.on("/ncsi.txt", HTTP_GET, captiveHandler);
+    _server.on("/connecttest.txt", HTTP_GET, captiveHandler);
+    _server.on("/library/test/success.html", HTTP_GET, captiveHandler);
+    _server.on("/success.txt", HTTP_GET, captiveHandler);
+
+    // CORS Preflight & 404 / Captive Fallback
     _server.onNotFound([this]() {
         if (_server.method() == HTTP_OPTIONS) {
             sendCORS();
             _server.send(204);
-        } else {
-            _server.send(404, "text/plain", "Not Found");
+            return;
         }
+        if (_network.isAPMode()) {
+            _server.sendHeader("Location", "http://192.168.4.1/", true);
+            _server.send(302, "text/plain", "");
+            return;
+        }
+        _server.send(404, "text/plain", "Not Found");
     });
 
     _server.on("/", HTTP_GET, [this]() { handleRoot(); });
@@ -52,10 +75,15 @@ void LocalAPIServer::setupRoutes() {
     _server.on("/api/ac/temp", HTTP_POST, [this]() { handleSetTemperature(); });
     _server.on("/api/ac/fan", HTTP_POST, [this]() { handleSetFan(); });
     _server.on("/api/ac/mode", HTTP_POST, [this]() { handleSetMode(); });
+
+    // Wi-Fi Onboarding & Configuration Routes
+    _server.on("/api/wifi/scan", HTTP_GET, [this]() { handleWifiScan(); });
+    _server.on("/api/wifi/configure", HTTP_POST, [this]() { handleWifiConfigure(); });
+    _server.on("/api/wifi/status", HTTP_GET, [this]() { handleWifiStatus(); });
 }
 
 void LocalAPIServer::handleRoot() {
-    // Embedded HTML dashboard for zero-dependency browser access
+    // Embedded HTML dashboard for zero-dependency browser access and captive portal onboarding
     String html = R"rawliteral(
 <!DOCTYPE html>
 <html lang="en">
@@ -64,57 +92,116 @@ void LocalAPIServer::handleRoot() {
   <title>Azure Essence Smart AC</title>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; }
-    body { background: #0f172a; color: #f8fafc; padding: 20px; display: flex; justify-content: center; }
-    .card { background: #1e293b; border-radius: 16px; padding: 24px; max-width: 440px; width: 100%; box-shadow: 0 10px 25px rgba(0,0,0,0.5); }
+    body { background: #0f172a; color: #f8fafc; padding: 16px; display: flex; justify-content: center; }
+    .card { background: #1e293b; border-radius: 16px; padding: 20px; max-width: 440px; width: 100%; box-shadow: 0 10px 25px rgba(0,0,0,0.5); margin-bottom: 16px; }
     h1 { font-size: 1.3rem; margin-bottom: 4px; color: #38bdf8; text-align: center; }
-    .sub { text-align: center; color: #94a3b8; font-size: 0.85rem; margin-bottom: 20px; }
-    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 20px; }
-    .metric { background: #0f172a; padding: 14px; border-radius: 12px; text-align: center; }
-    .metric-val { font-size: 1.8rem; font-weight: bold; color: #f1f5f9; }
-    .metric-lbl { font-size: 0.75rem; color: #64748b; margin-top: 4px; text-transform: uppercase; letter-spacing: 0.05em; }
-    .temp-dial { background: #0f172a; border-radius: 16px; padding: 20px; text-align: center; margin-bottom: 20px; }
-    .dial-title { font-size: 0.85rem; color: #94a3b8; margin-bottom: 8px; }
-    .dial-val { font-size: 3.2rem; font-weight: 800; color: #38bdf8; }
-    .dial-btns { display: flex; justify-content: center; gap: 16px; margin-top: 10px; }
-    .btn-circle { width: 44px; height: 44px; border-radius: 50%; border: none; background: #334155; color: white; font-size: 1.4rem; cursor: pointer; }
-    .btn-circle:active { background: #38bdf8; color: #0f172a; }
-    .power-btn { width: 100%; padding: 14px; border-radius: 12px; border: none; font-size: 1.1rem; font-weight: bold; cursor: pointer; margin-bottom: 16px; transition: 0.2s; }
+    .sub { text-align: center; color: #94a3b8; font-size: 0.85rem; margin-bottom: 16px; }
+    .badge { display: inline-block; padding: 4px 10px; border-radius: 999px; font-size: 0.72rem; font-weight: 700; margin-bottom: 12px; }
+    .badge-ap { background: rgba(245, 158, 11, 0.2); color: #fbbf24; border: 1px solid rgba(245, 158, 11, 0.4); }
+    .badge-sta { background: rgba(16, 185, 129, 0.2); color: #34d399; border: 1px solid rgba(16, 185, 129, 0.4); }
+    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 16px; }
+    .metric { background: #0f172a; padding: 12px; border-radius: 10px; text-align: center; }
+    .metric-val { font-size: 1.6rem; font-weight: bold; color: #f1f5f9; }
+    .metric-lbl { font-size: 0.72rem; color: #64748b; margin-top: 4px; text-transform: uppercase; }
+    .temp-dial { background: #0f172a; border-radius: 14px; padding: 16px; text-align: center; margin-bottom: 16px; }
+    .dial-title { font-size: 0.8rem; color: #94a3b8; margin-bottom: 6px; }
+    .dial-val { font-size: 2.8rem; font-weight: 800; color: #38bdf8; }
+    .dial-btns { display: flex; justify-content: center; gap: 14px; margin-top: 8px; }
+    .btn-circle { width: 42px; height: 42px; border-radius: 50%; border: none; background: #334155; color: white; font-size: 1.3rem; cursor: pointer; }
+    .power-btn { width: 100%; padding: 12px; border-radius: 10px; border: none; font-size: 1rem; font-weight: bold; cursor: pointer; margin-bottom: 14px; }
     .power-on { background: #10b981; color: white; }
     .power-off { background: #ef4444; color: white; }
-    .sec-title { font-size: 0.8rem; color: #64748b; margin-bottom: 8px; text-transform: uppercase; }
-    .btn-group { display: flex; gap: 8px; margin-bottom: 16px; }
-    .btn-group button { flex: 1; padding: 10px; border-radius: 8px; border: 1px solid #334155; background: #1e293b; color: #cbd5e1; font-size: 0.85rem; cursor: pointer; }
+    .sec-title { font-size: 0.78rem; color: #64748b; margin-bottom: 6px; text-transform: uppercase; font-weight: 700; }
+    .btn-group { display: flex; gap: 6px; margin-bottom: 14px; }
+    .btn-group button { flex: 1; padding: 8px; border-radius: 8px; border: 1px solid #334155; background: #1e293b; color: #cbd5e1; font-size: 0.8rem; cursor: pointer; }
     .btn-group button.active { background: #0284c7; color: white; border-color: #38bdf8; font-weight: bold; }
-    .status-bar { font-size: 0.8rem; color: #64748b; text-align: center; border-top: 1px solid #334155; padding-top: 12px; }
+    .status-bar { font-size: 0.75rem; color: #64748b; text-align: center; border-top: 1px solid #334155; padding-top: 10px; margin-top: 10px; }
+    
+    /* Wi-Fi Setup Box */
+    .wifi-section { background: #0f172a; border-radius: 14px; padding: 16px; margin-top: 16px; border: 1px solid #334155; }
+    .wifi-title { font-size: 0.95rem; font-weight: 700; color: #38bdf8; margin-bottom: 10px; display: flex; justify-content: space-between; align-items: center; }
+    .input-group { margin-bottom: 10px; }
+    .input-lbl { font-size: 0.72rem; color: #94a3b8; margin-bottom: 4px; display: block; }
+    .input-box, select.input-box { width: 100%; padding: 10px; border-radius: 8px; border: 1px solid #334155; background: #1e293b; color: #f8fafc; font-size: 0.85rem; outline: none; }
+    .btn-action { width: 100%; padding: 10px; border-radius: 8px; border: none; background: #0284c7; color: white; font-weight: 700; font-size: 0.85rem; cursor: pointer; margin-top: 6px; }
+    .btn-scan { background: #334155; color: #38bdf8; padding: 6px 12px; font-size: 0.75rem; border-radius: 6px; border: 1px solid #475569; cursor: pointer; }
+    .msg-box { font-size: 0.75rem; padding: 8px; border-radius: 6px; margin-top: 8px; display: none; line-height: 1.4; }
+    .msg-ok { background: rgba(16, 185, 129, 0.15); color: #34d399; border: 1px solid rgba(16, 185, 129, 0.3); }
+    .msg-err { background: rgba(239, 68, 68, 0.15); color: #f87171; border: 1px solid rgba(239, 68, 68, 0.3); }
+    .msg-info { background: rgba(56, 189, 248, 0.15); color: #38bdf8; border: 1px solid rgba(56, 189, 248, 0.3); }
   </style>
 </head>
 <body>
-  <div class="card">
-    <h1>Azure Essence AE-18</h1>
-    <div class="sub">Smart Controller Retrofit</div>
-    <div class="grid">
-      <div class="metric"><div class="metric-val" id="roomTemp">--.-&deg;C</div><div class="metric-lbl">Room Temp (DHT22)</div></div>
-      <div class="metric"><div class="metric-val" id="roomHum">--%</div><div class="metric-lbl">Humidity (DHT22)</div></div>
-    </div>
-    <button id="pwrBtn" class="power-btn power-off" onclick="togglePower()">Turn AC ON</button>
-    <div class="temp-dial">
-      <div class="dial-title">Target Temperature</div>
-      <div class="dial-val" id="targetTemp">25&deg;C</div>
-      <div class="dial-btns">
-        <button class="btn-circle" onclick="adjTemp(-1)">&minus;</button>
-        <button class="btn-circle" onclick="adjTemp(1)">&plus;</button>
+  <div style="max-width: 440px; width: 100%;">
+    <div class="card">
+      <div style="text-align: center;">
+        <span id="wifiBadge" class="badge badge-ap">AP Mode: AzureEssence-SmartAC</span>
       </div>
+      <h1>Azure Essence AE-18</h1>
+      <div class="sub">Autonomous Smart AC Controller</div>
+
+      <!-- Live Climate Metrics -->
+      <div class="grid">
+        <div class="metric"><div class="metric-val" id="roomTemp">--.-&deg;C</div><div class="metric-lbl">Room Temp</div></div>
+        <div class="metric"><div class="metric-val" id="roomHum">--%</div><div class="metric-lbl">Humidity</div></div>
+      </div>
+
+      <!-- AC Controls -->
+      <button id="pwrBtn" class="power-btn power-off" onclick="togglePower()">Turn AC ON</button>
+      <div class="temp-dial">
+        <div class="dial-title">Target Temperature</div>
+        <div class="dial-val" id="targetTemp">25&deg;C</div>
+        <div class="dial-btns">
+          <button class="btn-circle" onclick="adjTemp(-1)">&minus;</button>
+          <button class="btn-circle" onclick="adjTemp(1)">&plus;</button>
+        </div>
+      </div>
+
+      <div class="sec-title">Fan Speed</div>
+      <div class="btn-group" id="fanGroup">
+        <button onclick="setFan('auto')" id="fan-auto" class="active">Auto</button>
+        <button onclick="setFan('med')" id="fan-med">Med</button>
+        <button onclick="setFan('high')" id="fan-high">High</button>
+      </div>
+
+      <!-- Wi-Fi Network Setup Card -->
+      <div class="wifi-section">
+        <div class="wifi-title">
+          <span>Wi-Fi Network Setup</span>
+          <button class="btn-scan" id="btnScan" onclick="scanWifi()">Scan Networks</button>
+        </div>
+        
+        <div class="input-group">
+          <label class="input-lbl" for="wifiSelect">Discovered Networks</label>
+          <select id="wifiSelect" class="input-box" onchange="onSelectNetwork()">
+            <option value="">-- Tap 'Scan Networks' to search --</option>
+          </select>
+        </div>
+
+        <div class="input-group">
+          <label class="input-lbl" for="ssidInput">Network SSID</label>
+          <input type="text" id="ssidInput" class="input-box" placeholder="e.g. MyHome-WiFi">
+        </div>
+
+        <div class="input-group">
+          <label class="input-lbl" for="passInput">Wi-Fi Password</label>
+          <div style="display: flex; gap: 6px;">
+            <input type="password" id="passInput" class="input-box" placeholder="Enter Wi-Fi password">
+            <button type="button" class="btn-scan" style="padding: 0 10px;" onclick="togglePass()">Show</button>
+          </div>
+        </div>
+
+        <button class="btn-action" id="btnConnect" onclick="saveAndConnectWifi()">Save &amp; Connect to Wi-Fi</button>
+        <div id="wifiMsg" class="msg-box"></div>
+      </div>
+
+      <div class="status-bar" id="statusLine">Connecting to ESP32...</div>
     </div>
-    <div class="sec-title">Fan Speed</div>
-    <div class="btn-group" id="fanGroup">
-      <button onclick="setFan('auto')" id="fan-auto" class="active">Auto</button>
-      <button onclick="setFan('med')" id="fan-med">Med</button>
-      <button onclick="setFan('high')" id="fan-high">High</button>
-    </div>
-    <div class="status-bar" id="statusLine">Connecting to ESP32...</div>
   </div>
+
   <script>
     let curState = { power: false, temperature: 25, fan_speed: 'auto' };
+
     async function fetchStatus() {
       try {
         const res = await fetch('/api/status');
@@ -127,11 +214,22 @@ void LocalAPIServer::handleRoot() {
           curState = d.ac;
           renderState();
         }
-        document.getElementById('statusLine').innerText = 'Online | IP: ' + d.system.ip + ' | ' + (d.system.uptime_s) + 's uptime';
+        const b = document.getElementById('wifiBadge');
+        if (d.system) {
+          if (d.system.is_ap) {
+            b.className = 'badge badge-ap';
+            b.innerText = 'AP Mode: AzureEssence-SmartAC (192.168.4.1)';
+          } else {
+            b.className = 'badge badge-sta';
+            b.innerText = 'Connected: ' + (d.system.ip || 'Wi-Fi') + ' (' + d.system.rssi + ' dBm)';
+          }
+          document.getElementById('statusLine').innerText = 'IP: ' + d.system.ip + ' | Heap: ' + Math.round(d.system.free_heap/1024) + 'KB | ' + d.system.uptime_s + 's up';
+        }
       } catch (e) {
         document.getElementById('statusLine').innerText = 'Offline / Waiting for signal...';
       }
     }
+
     function renderState() {
       const btn = document.getElementById('pwrBtn');
       if (curState.power) {
@@ -147,6 +245,7 @@ void LocalAPIServer::handleRoot() {
         if (el) el.className = (curState.fan_speed.toLowerCase() === f) ? 'active' : '';
       });
     }
+
     async function togglePower() {
       await fetch('/api/ac/power', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ power: !curState.power }) });
       fetchStatus();
@@ -161,7 +260,83 @@ void LocalAPIServer::handleRoot() {
       await fetch('/api/ac/fan', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ fan: spd }) });
       fetchStatus();
     }
-    setInterval(fetchStatus, 2000);
+
+    function togglePass() {
+      const p = document.getElementById('passInput');
+      p.type = (p.type === 'password') ? 'text' : 'password';
+    }
+
+    async function scanWifi() {
+      const b = document.getElementById('btnScan');
+      b.innerText = 'Scanning...';
+      b.disabled = true;
+      try {
+        const res = await fetch('/api/wifi/scan');
+        const list = await res.json();
+        const sel = document.getElementById('wifiSelect');
+        sel.innerHTML = '<option value="">-- Choose a network (' + list.length + ' found) --</option>';
+        list.forEach(n => {
+          const opt = document.createElement('option');
+          opt.value = n.ssid;
+          opt.innerText = n.ssid + ' (' + n.rssi + ' dBm, ' + (n.secure ? 'Secured' : 'Open') + ')';
+          sel.appendChild(opt);
+        });
+      } catch (err) {
+        showMsg('Scan failed: ' + err.message, 'err');
+      } finally {
+        b.innerText = 'Scan Networks';
+        b.disabled = false;
+      }
+    }
+
+    function onSelectNetwork() {
+      const sel = document.getElementById('wifiSelect');
+      if (sel.value) {
+        document.getElementById('ssidInput').value = sel.value;
+        document.getElementById('passInput').focus();
+      }
+    }
+
+    async function saveAndConnectWifi() {
+      const ssid = document.getElementById('ssidInput').value.trim();
+      const pass = document.getElementById('passInput').value;
+      if (!ssid) {
+        showMsg('Please select or type a Wi-Fi SSID', 'err');
+        return;
+      }
+      showMsg('Saving credentials and connecting to "' + ssid + '"... The controller will reboot/reconnect. If in AP mode, connect to your router and visit http://smart-ac.local', 'info');
+      const b = document.getElementById('btnConnect');
+      b.disabled = true;
+      b.innerText = 'Connecting...';
+      try {
+        const res = await fetch('/api/wifi/configure', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ ssid: ssid, password: pass })
+        });
+        const d = await res.json();
+        if (d.success) {
+          showMsg('Success! Connected/saved credentials for ' + ssid + '. You can now access http://smart-ac.local on your Wi-Fi.', 'ok');
+        } else {
+          showMsg('Error: ' + (d.error || 'Failed to save'), 'err');
+        }
+      } catch (err) {
+        showMsg('Request dispatched. Controller may have switched networks. Reconnect your device to ' + ssid + ' and open http://smart-ac.local', 'ok');
+      } finally {
+        b.disabled = false;
+        b.innerText = 'Save & Connect to Wi-Fi';
+        setTimeout(fetchStatus, 3000);
+      }
+    }
+
+    function showMsg(text, type) {
+      const el = document.getElementById('wifiMsg');
+      el.style.display = 'block';
+      el.className = 'msg-box msg-' + type;
+      el.innerText = text;
+    }
+
+    setInterval(fetchStatus, 2500);
     fetchStatus();
   </script>
 </body>
@@ -326,6 +501,68 @@ void LocalAPIServer::handleSetMode() {
     } else {
         _server.send(400, "application/json", "{\"error\":\"Invalid mode (cool, dry, fan, auto)\"}");
     }
+}
+
+void LocalAPIServer::handleWifiScan() {
+    sendCORS();
+    std::vector<network::ScannedNetwork> networks = _network.scanNetworks();
+    JsonDocument doc;
+    JsonArray arr = doc.to<JsonArray>();
+    for (const auto& net : networks) {
+        JsonObject obj = arr.add<JsonObject>();
+        obj["ssid"] = net.ssid;
+        obj["rssi"] = net.rssi;
+        obj["secure"] = net.isSecure;
+        obj["auth"] = net.authMode;
+    }
+    String out;
+    serializeJson(doc, out);
+    _server.send(200, "application/json", out);
+}
+
+void LocalAPIServer::handleWifiConfigure() {
+    sendCORS();
+    if (!_server.hasArg("plain")) {
+        _server.send(400, "application/json", "{\"error\":\"Missing body\"}");
+        return;
+    }
+    JsonDocument doc;
+    DeserializationError err = deserializeJson(doc, _server.arg("plain"));
+    if (err) {
+        _server.send(400, "application/json", "{\"error\":\"Invalid JSON\"}");
+        return;
+    }
+
+    String ssid = doc["ssid"] | "";
+    String pass = doc["password"] | "";
+    ssid.trim();
+
+    if (ssid.length() == 0) {
+        _server.send(400, "application/json", "{\"error\":\"SSID cannot be empty\"}");
+        return;
+    }
+
+    bool ok = _network.configureWifi(ssid, pass);
+    if (ok) {
+        _server.send(200, "application/json", "{\"success\":true,\"message\":\"Credentials saved. Connecting to network...\"}");
+    } else {
+        _server.send(500, "application/json", "{\"error\":\"Failed to save credentials\"}");
+    }
+}
+
+void LocalAPIServer::handleWifiStatus() {
+    sendCORS();
+    JsonDocument doc;
+    doc["connected"] = (WiFi.status() == WL_CONNECTED);
+    doc["is_ap"] = _network.isAPMode();
+    doc["ssid"] = _network.getSSID();
+    doc["ip"] = _network.getIPAddress();
+    doc["rssi"] = _network.getRSSI();
+    doc["hostname"] = _network.getHostname();
+    doc["mac"] = WiFi.macAddress();
+    String out;
+    serializeJson(doc, out);
+    _server.send(200, "application/json", out);
 }
 
 } // namespace ac::api

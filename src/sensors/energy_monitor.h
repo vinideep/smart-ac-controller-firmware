@@ -74,6 +74,41 @@ public:
     float getEnergyKwhToday() const { return _reading.energy_kwh_today; }
     float getEstimatedCostToday() const { return _reading.estimated_cost_today; }
 
+    // Power Tier Classification
+    enum class PowerStateTier {
+        Standby,
+        FanOnly,
+        CompressorActive
+    };
+
+    PowerStateTier getPowerTier() const {
+        if (_reading.power_watts >= 250.0f) return PowerStateTier::CompressorActive;
+        if (_reading.power_watts >= 20.0f) return PowerStateTier::FanOnly;
+        return PowerStateTier::Standby;
+    }
+
+    const char* getPowerTierStr() const {
+        switch (getPowerTier()) {
+            case PowerStateTier::CompressorActive: return "compressor_cooling";
+            case PowerStateTier::FanOnly: return "fan_only";
+            case PowerStateTier::Standby:
+            default: return "standby";
+        }
+    }
+
+    bool isCompressorActive() const { return _reading.power_watts >= 250.0f; }
+    bool isFanActive() const { return _reading.power_watts >= 20.0f && _reading.power_watts < 250.0f; }
+    bool isStandby() const { return _reading.power_watts < 20.0f; }
+    bool isHardwareSensorActive() const { return _hardwareSensorActive; }
+
+    /**
+     * @brief Samples physical analog current from a CT clamp or ACS712 sensor.
+     * @param pin Analog ADC pin (e.g. GPIO 34)
+     * @param calibration Current transformer calibration factor (e.g. 30.0 for SCT-013-030)
+     * @return true if sampling succeeded
+     */
+    bool sampleAdcCurrent(uint8_t pin, float calibration = 30.0f);
+
     /**
      * @brief Resets cumulative daily energy and cost counters (e.g. at midnight).
      */
@@ -95,6 +130,7 @@ private:
     double _accumulatedKwh = 0.0;
     uint32_t _lastUpdateTime = 0;
     bool _initialized = false;
+    bool _hardwareSensorActive = false;
 
     void accumulateEnergy(uint32_t nowMs);
 };

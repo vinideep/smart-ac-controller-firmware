@@ -43,6 +43,7 @@ struct AutomationConfig {
 
     bool ecoDriftEnabled = true;
     bool psychrometricEnabled = true;
+    bool comfortIndexOptimization = true;
     float dryModeHumidityThreshold = 65.0f;
     bool thermalBreachProtection = true;
     float breachRiseThreshold = 1.2f;
@@ -88,6 +89,9 @@ public:
 
     void setPsychrometricEnabled(bool enable);
     bool isPsychrometricEnabled() const { return _config.psychrometricEnabled; }
+
+    void setComfortIndexOptimization(bool enable);
+    bool isComfortIndexOptimization() const { return _config.comfortIndexOptimization; }
 
     void setDryModeHumidityThreshold(float threshold);
     float getDryModeHumidityThreshold() const { return _config.dryModeHumidityThreshold; }

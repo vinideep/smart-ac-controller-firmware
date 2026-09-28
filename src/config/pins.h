@@ -66,3 +66,11 @@
 #define RADAR_BAUD_RATE 115200
 #endif
 
+#ifndef CURRENT_SENSOR_PIN
+#define CURRENT_SENSOR_PIN 34 // ADC1_CH6 (Analog input for SCT-013 or ACS712 CT current sensor)
+#endif
+
+#ifndef HAS_CURRENT_SENSOR
+#define HAS_CURRENT_SENSOR false // Set true if physical CT clamp / current sensor is wired to CURRENT_SENSOR_PIN
+#endif
+

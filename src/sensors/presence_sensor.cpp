@@ -1,4 +1,5 @@
 #include "presence_sensor.h"
+#include "../storage/storage_manager.h"
 #include <HardwareSerial.h>
 
 namespace ac::sensors {
@@ -12,8 +13,17 @@ void PresenceSensorDriver::begin() {
         if (_rxPin >= 0 && _txPin >= 0) {
             Serial2.begin(_baud, SERIAL_8N1, _rxPin, _txPin);
         }
+        storage::RadarStorageConfig cfg;
+        if (storage::StorageManager::loadRadarConfig(cfg)) {
+            _minDistanceM = cfg.minDistanceM;
+            _maxDistanceM = cfg.maxDistanceM;
+            _minMovingEnergy = cfg.minMovingEnergy;
+            _minStationaryEnergy = cfg.minStationaryEnergy;
+            _absenceTimeoutMs = cfg.absenceTimeoutS * 1000;
+        }
         _stateStartTime = millis();
         _reading.last_seen_ms = millis();
+        _lastPresenceDetectedMs = millis();
         _initialized = true;
     }
 }
@@ -44,25 +54,36 @@ bool PresenceSensorDriver::parseFrame(const uint8_t* buf, size_t len) {
     _reading.stationary_distance_cm = statDist;
     _reading.stationary_energy = statEnergy;
 
-    if (targetState == 0x01) {
-        _reading.present = true;
-        _reading.target_count = 1;
-        _reading.motion_state = "Moving Target";
-        _reading.distance_m = moveDist / 100.0f;
-    } else if (targetState == 0x02) {
-        _reading.present = true;
-        _reading.target_count = 1;
-        _reading.motion_state = "Stationary / Human Present";
-        _reading.distance_m = statDist / 100.0f;
-    } else if (targetState == 0x03) {
-        _reading.present = true;
+    float moveDistM = moveDist / 100.0f;
+    float statDistM = statDist / 100.0f;
+
+    bool moveValid = (targetState == 0x01 || targetState == 0x03) &&
+                     (moveDistM >= _minDistanceM && moveDistM <= _maxDistanceM) &&
+                     (moveEnergy >= _minMovingEnergy);
+
+    bool statValid = (targetState == 0x02 || targetState == 0x03) &&
+                     (statDistM >= _minDistanceM && statDistM <= _maxDistanceM) &&
+                     (statEnergy >= _minStationaryEnergy);
+
+    if (moveValid && statValid) {
+        _rawInZoneDetected = true;
         _reading.target_count = 2;
-        _reading.motion_state = "Moving + Stationary";
-        _reading.distance_m = (moveDist > 0 && moveDist < statDist) ? (moveDist / 100.0f) : (statDist / 100.0f);
+        _reading.motion_state = "Moving + Stationary (In Zone)";
+        _reading.distance_m = (moveDistM > 0.05f && moveDistM < statDistM) ? moveDistM : statDistM;
+    } else if (moveValid) {
+        _rawInZoneDetected = true;
+        _reading.target_count = 1;
+        _reading.motion_state = "Moving Target (In Zone)";
+        _reading.distance_m = moveDistM;
+    } else if (statValid) {
+        _rawInZoneDetected = true;
+        _reading.target_count = 1;
+        _reading.motion_state = "Stationary / Human Present (In Zone)";
+        _reading.distance_m = statDistM;
     } else {
-        _reading.present = false;
+        _rawInZoneDetected = false;
         _reading.target_count = 0;
-        _reading.motion_state = "None";
+        _reading.motion_state = (targetState != 0x00) ? "Filtered Out-of-Zone" : "None";
         _reading.distance_m = 0.0f;
     }
 
@@ -127,7 +148,19 @@ bool PresenceSensorDriver::update() {
 
     bool uartActive = (_lastUartFrameTime > 0 && (now - _lastUartFrameTime < 2500));
 
-    if (!uartActive) {
+    if (uartActive) {
+        if (_rawInZoneDetected) {
+            _lastPresenceDetectedMs = now;
+            _reading.present = true;
+        } else {
+            // Asymmetric Debounce: hold active presence until absence timeout expires
+            if (_lastPresenceDetectedMs == 0 || (now - _lastPresenceDetectedMs >= _absenceTimeoutMs)) {
+                _reading.present = false;
+            } else {
+                _reading.present = true;
+            }
+        }
+    } else {
         int pinLevel = digitalRead(_pin);
         bool detected = _activeLow ? (pinLevel == LOW) : (pinLevel == HIGH);
 
@@ -141,15 +174,21 @@ bool PresenceSensorDriver::update() {
         }
 
         if (_debounceCount >= 3) {
-            _reading.present = detected;
             if (detected) {
+                _lastPresenceDetectedMs = now;
+                _reading.present = true;
                 _reading.motion_state = "Micro-motion / Human Present";
                 _reading.target_count = 1;
                 _reading.distance_m = 1.8f;
             } else {
-                _reading.motion_state = "None";
-                _reading.target_count = 0;
-                _reading.distance_m = 0.0f;
+                if (_lastPresenceDetectedMs == 0 || (now - _lastPresenceDetectedMs >= _absenceTimeoutMs)) {
+                    _reading.present = false;
+                    _reading.motion_state = "None";
+                    _reading.target_count = 0;
+                    _reading.distance_m = 0.0f;
+                } else {
+                    _reading.present = true;
+                }
             }
         }
     }
@@ -174,6 +213,48 @@ bool PresenceSensorDriver::update() {
     return stateChanged;
 }
 
+void PresenceSensorDriver::setDistanceGates(float minM, float maxM) {
+    if (minM >= 0.0f && maxM > minM && maxM <= 10.0f) {
+        _minDistanceM = minM;
+        _maxDistanceM = maxM;
+        storage::RadarStorageConfig cfg;
+        cfg.minDistanceM = _minDistanceM;
+        cfg.maxDistanceM = _maxDistanceM;
+        cfg.minMovingEnergy = _minMovingEnergy;
+        cfg.minStationaryEnergy = _minStationaryEnergy;
+        cfg.absenceTimeoutS = _absenceTimeoutMs / 1000;
+        storage::StorageManager::saveRadarConfig(cfg);
+        Serial.printf("[RADAR] Distance gates updated: %.2fm to %.2fm\n", _minDistanceM, _maxDistanceM);
+    }
+}
+
+void PresenceSensorDriver::setEnergyThresholds(uint8_t minMoveEnergy, uint8_t minStatEnergy) {
+    _minMovingEnergy = minMoveEnergy;
+    _minStationaryEnergy = minStatEnergy;
+    storage::RadarStorageConfig cfg;
+    cfg.minDistanceM = _minDistanceM;
+    cfg.maxDistanceM = _maxDistanceM;
+    cfg.minMovingEnergy = _minMovingEnergy;
+    cfg.minStationaryEnergy = _minStationaryEnergy;
+    cfg.absenceTimeoutS = _absenceTimeoutMs / 1000;
+    storage::StorageManager::saveRadarConfig(cfg);
+    Serial.printf("[RADAR] Energy thresholds updated: Move=%u%%, Stat=%u%%\n", _minMovingEnergy, _minStationaryEnergy);
+}
+
+void PresenceSensorDriver::setAbsenceTimeoutSeconds(uint32_t seconds) {
+    if (seconds >= 5 && seconds <= 3600) {
+        _absenceTimeoutMs = seconds * 1000;
+        storage::RadarStorageConfig cfg;
+        cfg.minDistanceM = _minDistanceM;
+        cfg.maxDistanceM = _maxDistanceM;
+        cfg.minMovingEnergy = _minMovingEnergy;
+        cfg.minStationaryEnergy = _minStationaryEnergy;
+        cfg.absenceTimeoutS = seconds;
+        storage::StorageManager::saveRadarConfig(cfg);
+        Serial.printf("[RADAR] Absence debounce timeout updated: %u seconds\n", seconds);
+    }
+}
+
 void PresenceSensorDriver::toJSON(JsonDocument& doc) const {
     doc["presence"] = _reading.present;
     doc["duration_seconds"] = _reading.duration_seconds;
@@ -184,6 +265,12 @@ void PresenceSensorDriver::toJSON(JsonDocument& doc) const {
     doc["motion_state"] = _reading.motion_state;
     doc["moving_energy"] = _reading.moving_energy;
     doc["stationary_energy"] = _reading.stationary_energy;
+    doc["min_distance_m"] = _minDistanceM;
+    doc["max_distance_m"] = _maxDistanceM;
+    doc["min_moving_energy"] = _minMovingEnergy;
+    doc["min_stationary_energy"] = _minStationaryEnergy;
+    doc["absence_timeout_s"] = _absenceTimeoutMs / 1000;
+    doc["in_zone"] = _rawInZoneDetected;
     doc["uart_active"] = isUartActive();
     doc["uart_bytes_received"] = _totalUartBytes;
 }

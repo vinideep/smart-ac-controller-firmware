@@ -1598,7 +1598,353 @@ int main() {
         std::cout << "[TEST 60] PASS: Backend transmit_preset mapping emits atomic SET_AC_STATE without burst collisions" << std::endl;
     }
 
-    std::cout << "\nALL 60 UNIT TESTS PASSED SUCCESSFULLY!" << std::endl;
+    // Test 61: Wi-Fi credentials storage, validation, and NVS persistence logic
+    {
+        struct MockNvsWifi {
+            std::string ssid = "";
+            std::string pass = "";
+            bool hasSaved = false;
+
+            bool save(const std::string& s, const std::string& p) {
+                if (s.empty()) return false;
+                ssid = s;
+                pass = p;
+                hasSaved = true;
+                return true;
+            }
+
+            bool load(std::string& s, std::string& p) {
+                if (!hasSaved || ssid.empty()) return false;
+                s = ssid;
+                p = pass;
+                return true;
+            }
+
+            bool clear() {
+                ssid.clear();
+                pass.clear();
+                hasSaved = false;
+                return true;
+            }
+        };
+
+        MockNvsWifi nvs;
+        // 1. Empty SSID must be rejected
+        assert(nvs.save("", "password123") == false);
+        std::string s, p;
+        assert(nvs.load(s, p) == false);
+
+        // 2. Valid SSID and password saved
+        assert(nvs.save("Deeps-Home", "SecretPass!@#") == true);
+        assert(nvs.load(s, p) == true);
+        assert(s == "Deeps-Home");
+        assert(p == "SecretPass!@#");
+
+        // 3. Clear credentials
+        assert(nvs.clear() == true);
+        assert(nvs.load(s, p) == false);
+
+        std::cout << "[TEST 61] PASS: Wi-Fi credentials storage, validation, and persistence logic verified" << std::endl;
+    }
+
+    // Test 62: Network scanning deduplication and descending RSSI signal sorting
+    {
+        struct NetItem {
+            std::string ssid;
+            int32_t rssi;
+            bool secure;
+            std::string auth;
+        };
+
+        std::vector<NetItem> rawScanned = {
+            { "Neighbor-WiFi", -88, true, "WPA2" },
+            { "Home-WiFi", -52, true, "WPA2" },
+            { "Public-Hotspot", -75, false, "Open" },
+            { "Home-WiFi", -48, true, "WPA2" }, // Duplicate BSSID with better RSSI
+            { "", -60, true, "WPA2" }, // Hidden SSID
+        };
+
+        std::vector<NetItem> deduped;
+        for (const auto& item : rawScanned) {
+            if (item.ssid.empty()) continue;
+            bool found = false;
+            for (auto& existing : deduped) {
+                if (existing.ssid == item.ssid) {
+                    found = true;
+                    if (item.rssi > existing.rssi) {
+                        existing.rssi = item.rssi;
+                    }
+                    break;
+                }
+            }
+            if (!found) {
+                deduped.push_back(item);
+            }
+        }
+
+        // Sort descending by RSSI
+        std::sort(deduped.begin(), deduped.end(), [](const NetItem& a, const NetItem& b) {
+            return a.rssi > b.rssi;
+        });
+
+        assert(deduped.size() == 3);
+        assert(deduped[0].ssid == "Home-WiFi");
+        assert(deduped[0].rssi == -48); // Best RSSI selected
+        assert(deduped[1].ssid == "Public-Hotspot");
+        assert(deduped[1].rssi == -75);
+        assert(deduped[2].ssid == "Neighbor-WiFi");
+        assert(deduped[2].rssi == -88);
+
+        std::cout << "[TEST 62] PASS: Network scanning deduplication and descending RSSI signal sorting verified" << std::endl;
+    }
+
+    // Test 63: Wi-Fi JSON command parsing (wifi_configure, wifi_scan, wifi_reset)
+    {
+        auto parseWifiJsonCmd = [](const std::string& cmd, std::string& action, std::string& outSsid, std::string& outPass) -> bool {
+            if (cmd.find("\"cmd\":\"wifi_configure\"") != std::string::npos ||
+                cmd.find("\"cmd\":\"configure_wifi\"") != std::string::npos) {
+                action = "configure";
+                size_t sPos = cmd.find("\"ssid\":\"");
+                if (sPos == std::string::npos) return false;
+                size_t sEnd = cmd.find("\"", sPos + 8);
+                if (sEnd == std::string::npos) return false;
+                outSsid = cmd.substr(sPos + 8, sEnd - (sPos + 8));
+
+                size_t pPos = cmd.find("\"password\":\"");
+                if (pPos != std::string::npos) {
+                    size_t pEnd = cmd.find("\"", pPos + 12);
+                    if (pEnd != std::string::npos) {
+                        outPass = cmd.substr(pPos + 12, pEnd - (pPos + 12));
+                    }
+                }
+                return !outSsid.empty();
+            } else if (cmd.find("\"cmd\":\"wifi_scan\"") != std::string::npos) {
+                action = "scan";
+                return true;
+            } else if (cmd.find("\"cmd\":\"wifi_reset\"") != std::string::npos) {
+                action = "reset";
+                return true;
+            }
+            return false;
+        };
+
+        std::string act, ssid, pass;
+        assert(parseWifiJsonCmd("{\"cmd\":\"wifi_configure\",\"ssid\":\"NewOffice\",\"password\":\"WorkSecret99\"}", act, ssid, pass) == true);
+        assert(act == "configure");
+        assert(ssid == "NewOffice");
+        assert(pass == "WorkSecret99");
+
+        assert(parseWifiJsonCmd("{\"cmd\":\"wifi_scan\"}", act, ssid, pass) == true);
+        assert(act == "scan");
+
+        assert(parseWifiJsonCmd("{\"cmd\":\"wifi_reset\"}", act, ssid, pass) == true);
+        assert(act == "reset");
+
+        assert(parseWifiJsonCmd("{\"cmd\":\"wifi_configure\",\"ssid\":\"\"}", act, ssid, pass) == false);
+
+        std::cout << "[TEST 63] PASS: Wi-Fi JSON command parsing (wifi_configure, wifi_scan, wifi_reset) verified" << std::endl;
+    }
+
+    // Test 64: Wi-Fi serial text command parsing (SET_WIFI, WIFI_SCAN, WIFI_RESET)
+    {
+        auto parseWifiSerialCmd = [](const std::string& cmd, std::string& action, std::string& outSsid, std::string& outPass) -> bool {
+            if (cmd.rfind("SET_WIFI", 0) == 0) {
+                size_t firstSpace = cmd.find(' ');
+                if (firstSpace == std::string::npos) return false;
+                std::string rest = cmd.substr(firstSpace + 1);
+                // trim
+                while (!rest.empty() && rest.front() == ' ') rest.erase(rest.begin());
+                while (!rest.empty() && rest.back() == ' ') rest.pop_back();
+                if (rest.empty()) return false;
+                size_t secondSpace = rest.find(' ');
+                if (secondSpace != std::string::npos) {
+                    outSsid = rest.substr(0, secondSpace);
+                    outPass = rest.substr(secondSpace + 1);
+                    while (!outPass.empty() && outPass.front() == ' ') outPass.erase(outPass.begin());
+                } else {
+                    outSsid = rest;
+                    outPass = "";
+                }
+                action = "set_wifi";
+                return !outSsid.empty();
+            } else if (cmd == "WIFI_SCAN") {
+                action = "wifi_scan";
+                return true;
+            } else if (cmd == "WIFI_RESET") {
+                action = "wifi_reset";
+                return true;
+            }
+            return false;
+        };
+
+        std::string act, ssid, pass;
+        assert(parseWifiSerialCmd("SET_WIFI MySSID StrongPassword123", act, ssid, pass) == true);
+        assert(act == "set_wifi");
+        assert(ssid == "MySSID");
+        assert(pass == "StrongPassword123");
+
+        assert(parseWifiSerialCmd("SET_WIFI OpenCafe", act, ssid, pass) == true);
+        assert(act == "set_wifi");
+        assert(ssid == "OpenCafe");
+        assert(pass == "");
+
+        assert(parseWifiSerialCmd("WIFI_SCAN", act, ssid, pass) == true);
+        assert(act == "wifi_scan");
+
+        assert(parseWifiSerialCmd("WIFI_RESET", act, ssid, pass) == true);
+        assert(act == "wifi_reset");
+
+        assert(parseWifiSerialCmd("SET_WIFI", act, ssid, pass) == false);
+
+        std::cout << "[TEST 64] PASS: Wi-Fi serial text command parsing (SET_WIFI, WIFI_SCAN, WIFI_RESET) verified" << std::endl;
+    }
+
+    // Test 65: Captive Portal detection route matching & HTTP 302 redirection logic
+    {
+        auto isCaptivePortalProbe = [](const std::string& path) -> bool {
+            return (path == "/generate_204" ||
+                    path == "/gen_204" ||
+                    path == "/hotspot-detect.html" ||
+                    path == "/canonical.html" ||
+                    path == "/ncsi.txt" ||
+                    path == "/connecttest.txt" ||
+                    path == "/library/test/success.html" ||
+                    path == "/success.txt");
+        };
+
+        auto handleHttpRoute = [&](const std::string& path, bool isAPMode) -> int {
+            if (isCaptivePortalProbe(path)) {
+                return isAPMode ? 302 : 204;
+            }
+            if (path == "/" || path == "/api/status" || path == "/api/wifi/scan" ||
+                path == "/api/wifi/configure" || path == "/api/wifi/status") {
+                return 200;
+            }
+            // onNotFound handler
+            if (isAPMode) return 302;
+            return 404;
+        };
+
+        // When in AP Mode:
+        assert(handleHttpRoute("/generate_204", true) == 302);
+        assert(handleHttpRoute("/gen_204", true) == 302);
+        assert(handleHttpRoute("/hotspot-detect.html", true) == 302);
+        assert(handleHttpRoute("/ncsi.txt", true) == 302);
+        assert(handleHttpRoute("/library/test/success.html", true) == 302);
+        assert(handleHttpRoute("/random/unknown/path", true) == 302); // Wildcard redirect to 192.168.4.1
+        assert(handleHttpRoute("/", true) == 200);
+        assert(handleHttpRoute("/api/wifi/scan", true) == 200);
+
+        // When in Station Mode (connected to router, not in AP mode):
+        assert(handleHttpRoute("/generate_204", false) == 204);
+        assert(handleHttpRoute("/random/unknown/path", false) == 404);
+
+        std::cout << "[TEST 65] PASS: Captive Portal detection route matching & HTTP 302 redirection verified" << std::endl;
+    }
+
+    // Test 66: Wi-Fi fallback state machine: 15s connection timeout, deferred connect timing, >20s sustained disconnect fallback
+    {
+        struct WifiStateMachine {
+            bool isAPMode = false;
+            bool connecting = false;
+            uint32_t connectStartTime = 0;
+            uint32_t disconnectedSince = 0;
+            uint32_t lastReconnectAttempt = 0;
+            bool pendingConnect = false;
+            uint32_t pendingConnectAt = 0;
+            std::string ssid = "";
+
+            void startAP() { isAPMode = true; }
+
+            void scheduleConnect(const std::string& s, uint32_t now) {
+                ssid = s;
+                pendingConnect = true;
+                pendingConnectAt = now + 150;
+            }
+
+            void update(uint32_t now, bool isWlConnected) {
+                if (pendingConnect && now >= pendingConnectAt) {
+                    pendingConnect = false;
+                    connecting = true;
+                    connectStartTime = now;
+                    lastReconnectAttempt = now;
+                    disconnectedSince = 0;
+                }
+
+                if (isWlConnected) {
+                    disconnectedSince = 0;
+                    if (connecting) {
+                        connecting = false;
+                    }
+                } else {
+                    // 1. Initial/reconfigure timeout
+                    if (connecting && (now - connectStartTime > 15000)) {
+                        connecting = false;
+                        if (!isAPMode) startAP();
+                    }
+
+                    // 2. Sustained disconnect while in STA mode
+                    if (!isAPMode && !connecting) {
+                        if (disconnectedSince == 0) {
+                            disconnectedSince = now;
+                        } else if (now - disconnectedSince > 20000) {
+                            startAP();
+                            disconnectedSince = 0;
+                        }
+                    }
+                }
+            }
+        };
+
+        WifiStateMachine sm;
+        sm.ssid = "HomeWiFi";
+        sm.connecting = true;
+        sm.connectStartTime = 1000;
+
+        // At t=10s, still attempting connection, AP should NOT be running yet
+        sm.update(11000, false);
+        assert(sm.connecting == true);
+        assert(sm.isAPMode == false);
+
+        // At t=16.5s (>15s timeout), connection fails -> AP mode starts
+        sm.update(16500, false);
+        assert(sm.connecting == false);
+        assert(sm.isAPMode == true);
+
+        // Schedule new Wi-Fi configure via HTTP
+        sm.scheduleConnect("NewRouter", 20000);
+        assert(sm.pendingConnect == true);
+        assert(sm.connecting == false); // Not started immediately to preserve HTTP socket
+
+        // 150ms later, connection begins
+        sm.update(20150, false);
+        assert(sm.pendingConnect == false);
+        assert(sm.connecting == true);
+        assert(sm.connectStartTime == 20150);
+
+        // Simulate successful connection to NewRouter at t=23s
+        sm.update(23000, true);
+        assert(sm.connecting == false);
+        assert(sm.disconnectedSince == 0);
+
+        // Simulate device in STA mode losing connection at t=30s
+        sm.isAPMode = false;
+        sm.update(30000, false);
+        assert(sm.disconnectedSince == 30000);
+        assert(sm.isAPMode == false);
+
+        // Wi-Fi still lost 10s later (t=40s) -> no AP yet
+        sm.update(40000, false);
+        assert(sm.isAPMode == false);
+
+        // Wi-Fi still lost 21s later (t=51.1s > 20s sustained disconnect) -> AP launches!
+        sm.update(51100, false);
+        assert(sm.isAPMode == true);
+
+        std::cout << "[TEST 66] PASS: Wi-Fi fallback state machine: 15s timeout, deferred connect, and >20s disconnect fallback verified" << std::endl;
+    }
+
+    std::cout << "\nALL 66 UNIT TESTS PASSED SUCCESSFULLY!" << std::endl;
     return 0;
 }
 

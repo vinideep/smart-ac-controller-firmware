@@ -9,6 +9,7 @@
 #include "telemetry/telemetry.h"
 #include "ir/ir_manager.h"
 #include "ac/ac_controller.h"
+#include "ac/closed_loop_feedback.h"
 #include "safety/safety_manager.h"
 #include "automation/automation_engine.h"
 #include "network/network_manager.h"
@@ -21,6 +22,7 @@ ac::sensors::PresenceSensorDriver presenceSensor(PRESENCE_PIN, PRESENCE_ACTIVE_L
 ac::sensors::EnergyMonitor energyMonitor(8.0f, 230.0f); // Configurable tariff ₹8.0/kWh, nominal 230V
 ac::ir::IRReceiverDriver irReceiver(IR_RX_PIN, ac::ir::kCaptureBufferSize, ac::ir::kTimeout);
 ac::control::AzureEssenceController acController(IR_TX_PIN);
+ac::control::ClosedLoopFeedback closedLoopFeedback(acController, energyMonitor);
 ac::safety::SafetyManager safetyManager(10000, 10000, 2000); // 10s min on/off for automation, 2s throttle
 ac::automation::AutomationEngine automationEngine(acController, safetyManager, presenceSensor, dhtDriver);
 // Device identity
@@ -80,6 +82,7 @@ void setup() {
     acController.getTransmitter().setReceiver(&irReceiver);
     irReceiver.setTransmitter(&acController.getTransmitter());
     automationEngine.begin();
+    closedLoopFeedback.begin();
 
     // 6. Initialize Network Manager (Wi-Fi STA / Fallback AP) & Local REST Server
     networkManager.begin(WIFI_SSID, WIFI_PASSWORD, WIFI_HOSTNAME);
@@ -93,7 +96,7 @@ void setup() {
                   PRESENCE_PIN, PRESENCE_ACTIVE_LOW ? "LOW" : "HIGH", HAS_PRESENCE_SENSOR ? "ENABLED" : "DISABLED");
     Serial.printf("[SYSTEM] Energy Monitor active (Nominal: %.0fV, Tariff: %.2f/kWh)\n",
                   energyMonitor.getNominalVoltage(), energyMonitor.getTariff());
-    Serial.println("[SYSTEM] Ready. Commands: POWER_ON, POWER_OFF, SET_TEMP <16-31>, SET_MODE <COOL|DRY|FAN|AUTO>, SET_FAN <AUTO|MED|HIGH>, SET_AC_STATE <1|0> <temp> <mode> <fan>, AUTO_ON, AUTO_OFF, GET_STATE, GET_PRESENCE, GET_ENERGY, SET_TARIFF <rate>, SET_PRESENCE_POLARITY <HIGH|LOW>, TEST_TX");
+    Serial.println("[SYSTEM] Ready. Commands: POWER_ON, POWER_OFF, SET_TEMP <16-31>, SET_MODE <COOL|DRY|FAN|AUTO>, SET_FAN <AUTO|MED|HIGH>, SET_AC_STATE <1|0> <temp> <mode> <fan>, AUTO_ON, AUTO_OFF, GET_STATE, GET_PRESENCE, GET_ENERGY, SET_TARIFF <rate>, SET_PRESENCE_POLARITY <HIGH|LOW>, TEST_TX, SET_WIFI <ssid> [pass], WIFI_SCAN, WIFI_RESET");
 
     // Visual boot indication (double blink)
     for (int i = 0; i < 2; i++) {
@@ -125,6 +128,7 @@ void processCommand(const String& rawCmd) {
                     lastTxBlankingTime = millis();
                     safetyManager.recordPowerTransition(pwr, millis());
                     safetyManager.recordCommandSent(millis());
+                    closedLoopFeedback.notifyCommandSent(acController.getState(), millis());
                     digitalWrite(STATUS_LED_PIN, LOW);
                     Serial.printf("[CMD_OK] AC state set: Power=%d Temp=%d Mode=%s Fan=%s\n",
                                   pwr ? 1 : 0, temp, m, f);
@@ -138,6 +142,7 @@ void processCommand(const String& rawCmd) {
                 lastTxBlankingTime = millis();
                 acController.setPower(pwr, "json_cmd");
                 safetyManager.recordPowerTransition(pwr, millis());
+                closedLoopFeedback.notifyCommandSent(acController.getState(), millis());
                 digitalWrite(STATUS_LED_PIN, LOW);
                 Serial.printf("[CMD_OK] AC Power set to %s\n", pwr ? "ON" : "OFF");
             } else if (strcmp(commandType, "temp") == 0) {
@@ -145,12 +150,14 @@ void processCommand(const String& rawCmd) {
                 lastTxBlankingTime = millis();
                 acController.setTemperature(t, "serial_json");
                 safetyManager.recordCommandSent(millis());
+                closedLoopFeedback.notifyCommandSent(acController.getState(), millis());
             } else if (strcmp(commandType, "mode") == 0) {
                 const char* m = doc["value"] | "cool";
                 digitalWrite(STATUS_LED_PIN, HIGH);
                 lastTxBlankingTime = millis();
                 acController.setMode(String(m), "serial_json");
                 safetyManager.recordCommandSent(millis());
+                closedLoopFeedback.notifyCommandSent(acController.getState(), millis());
                 digitalWrite(STATUS_LED_PIN, LOW);
                 Serial.printf("[CMD_OK] AC Mode set to %s\n", m);
             } else if (strcmp(commandType, "fan") == 0) {
@@ -158,6 +165,7 @@ void processCommand(const String& rawCmd) {
                 lastTxBlankingTime = millis();
                 acController.setFanSpeed(String(spd), "serial_json");
                 safetyManager.recordCommandSent(millis());
+                closedLoopFeedback.notifyCommandSent(acController.getState(), millis());
             } else if (strcmp(commandType, "auto") == 0) {
                 bool en = doc["value"] | false;
                 automationEngine.setEnabled(en);
@@ -222,6 +230,65 @@ void processCommand(const String& rawCmd) {
                 bool activeLow = doc["active_low"] | false;
                 presenceSensor.setActiveLow(activeLow);
                 Serial.printf("[CMD_OK] Presence sensor polarity set to Active-%s\n", activeLow ? "LOW" : "HIGH");
+            } else if (strcmp(commandType, "radar_gates") == 0) {
+                float minM = doc["min_m"] | 0.2f;
+                float maxM = doc["max_m"] | 4.5f;
+                presenceSensor.setDistanceGates(minM, maxM);
+                Serial.printf("[CMD_OK] Radar gates set to %.2f - %.2f m\n", minM, maxM);
+            } else if (strcmp(commandType, "radar_energy") == 0) {
+                uint8_t moveE = doc["min_moving"] | 15;
+                uint8_t statE = doc["min_stationary"] | 15;
+                presenceSensor.setEnergyThresholds(moveE, statE);
+                Serial.printf("[CMD_OK] Radar energy thresholds set to Move=%u%% Stat=%u%%\n", moveE, statE);
+            } else if (strcmp(commandType, "absence_timeout") == 0) {
+                uint32_t to = doc["value"] | 600;
+                presenceSensor.setAbsenceTimeoutSeconds(to);
+                Serial.printf("[CMD_OK] Radar absence debounce timeout set to %u s\n", to);
+            } else if (strcmp(commandType, "closed_loop") == 0) {
+                if (!doc["enabled"].isNull()) closedLoopFeedback.setEnabled(doc["enabled"].as<bool>());
+                if (!doc["verify_timeout_s"].isNull()) closedLoopFeedback.setVerificationTimeoutSeconds(doc["verify_timeout_s"].as<uint32_t>());
+                if (!doc["max_retries"].isNull()) closedLoopFeedback.setMaxRetries(doc["max_retries"].as<uint8_t>());
+                Serial.println("[CMD_OK] Closed-loop configuration updated");
+            } else if (strcmp(commandType, "comfort_opt") == 0) {
+                bool en = doc["value"] | false;
+                automationEngine.setComfortIndexOptimization(en);
+                Serial.printf("[CMD_OK] Comfort index optimization set to %s\n", en ? "ENABLED" : "DISABLED");
+            } else if (strcmp(commandType, "get_closed_loop") == 0) {
+                JsonDocument clDoc;
+                closedLoopFeedback.toJSON(clDoc);
+                String clOut;
+                serializeJson(clDoc, clOut);
+                Serial.println(clOut);
+            } else if (strcmp(commandType, "wifi_configure") == 0 || strcmp(commandType, "configure_wifi") == 0) {
+                const char* s = doc["ssid"] | "";
+                const char* p = doc["password"] | "";
+                if (strlen(s) > 0) {
+                    networkManager.configureWifi(String(s), String(p));
+                    Serial.printf("[CMD_OK] Configured Wi-Fi for SSID: %s\n", s);
+                } else {
+                    Serial.println("[CMD_ERR] SSID cannot be empty");
+                }
+            } else if (strcmp(commandType, "wifi_scan") == 0) {
+                std::vector<ac::network::ScannedNetwork> nets = networkManager.scanNetworks();
+                JsonDocument scanDoc;
+                scanDoc["type"] = "wifi_scan_results";
+                scanDoc["device_id"] = deviceId;
+                JsonArray arr = scanDoc["networks"].to<JsonArray>();
+                for (const auto& n : nets) {
+                    JsonObject o = arr.add<JsonObject>();
+                    o["ssid"] = n.ssid;
+                    o["rssi"] = n.rssi;
+                    o["secure"] = n.isSecure;
+                    o["auth"] = n.authMode;
+                }
+                serializeJson(scanDoc, Serial);
+                Serial.println();
+                if (cloudClient.isEnabled()) {
+                    cloudClient.pushTelemetry(scanDoc);
+                }
+            } else if (strcmp(commandType, "wifi_reset") == 0) {
+                networkManager.resetWifiCredentials();
+                Serial.println("[CMD_OK] Wi-Fi credentials reset to defaults");
             }
             return;
         }
@@ -277,6 +344,7 @@ void processCommand(const String& rawCmd) {
                     lastTxBlankingTime = millis();
                     safetyManager.recordPowerTransition(pwr, millis());
                     safetyManager.recordCommandSent(millis());
+                    closedLoopFeedback.notifyCommandSent(acController.getState(), millis());
                     digitalWrite(STATUS_LED_PIN, LOW);
                     Serial.printf("[CMD_OK] AC state set: Power=%d Temp=%d Mode=%s Fan=%s\n",
                                   pwr ? 1 : 0, temp, mode.c_str(), fan.c_str());
@@ -295,6 +363,7 @@ void processCommand(const String& rawCmd) {
         lastTxBlankingTime = millis();
         acController.setPower(true, "manual_cmd");
         safetyManager.recordPowerTransition(true, millis());
+        closedLoopFeedback.notifyCommandSent(acController.getState(), millis());
         digitalWrite(STATUS_LED_PIN, LOW);
         Serial.println("[CMD_OK] AC Power ON sent");
     } else if (upper == "POWER_OFF" || upper == "OFF") {
@@ -302,6 +371,7 @@ void processCommand(const String& rawCmd) {
         lastTxBlankingTime = millis();
         acController.setPower(false, "manual_cmd");
         safetyManager.recordPowerTransition(false, millis());
+        closedLoopFeedback.notifyCommandSent(acController.getState(), millis());
         digitalWrite(STATUS_LED_PIN, LOW);
         Serial.println("[CMD_OK] AC Power OFF sent");
     } else if (upper.startsWith("SET_TEMP")) {
@@ -314,6 +384,7 @@ void processCommand(const String& rawCmd) {
                 lastTxBlankingTime = millis();
                 acController.setTemperature((uint8_t)tempVal, "serial");
                 safetyManager.recordCommandSent(millis());
+                closedLoopFeedback.notifyCommandSent(acController.getState(), millis());
                 digitalWrite(STATUS_LED_PIN, LOW);
                 Serial.printf("[CMD_OK] AC Temperature set to %d C\n", tempVal);
             } else {
@@ -332,6 +403,7 @@ void processCommand(const String& rawCmd) {
                 lastTxBlankingTime = millis();
                 acController.setMode(m, "serial");
                 safetyManager.recordCommandSent(millis());
+                closedLoopFeedback.notifyCommandSent(acController.getState(), millis());
                 digitalWrite(STATUS_LED_PIN, LOW);
                 Serial.printf("[CMD_OK] AC Mode set to %s\n", m.c_str());
             } else {
@@ -349,6 +421,7 @@ void processCommand(const String& rawCmd) {
             lastTxBlankingTime = millis();
             acController.setFanSpeed(spd, "serial");
             safetyManager.recordCommandSent(millis());
+            closedLoopFeedback.notifyCommandSent(acController.getState(), millis());
             digitalWrite(STATUS_LED_PIN, LOW);
             Serial.printf("[CMD_OK] AC Fan set to %s\n", spd.c_str());
         } else {
@@ -447,6 +520,77 @@ void processCommand(const String& rawCmd) {
         } else {
             Serial.println("[CMD_ERR] Usage: SET_PRESENCE_POLARITY <HIGH|LOW>");
         }
+    } else if (upper.startsWith("SET_RADAR_GATES")) {
+        int spaceIdx = upper.indexOf(' ');
+        if (spaceIdx > 0) {
+            String rest = upper.substring(spaceIdx + 1);
+            rest.trim();
+            int secondSpace = rest.indexOf(' ');
+            if (secondSpace > 0) {
+                float minM = rest.substring(0, secondSpace).toFloat();
+                float maxM = rest.substring(secondSpace + 1).toFloat();
+                presenceSensor.setDistanceGates(minM, maxM);
+                Serial.printf("[CMD_OK] Radar gates set to %.2fm - %.2fm\n", minM, maxM);
+            } else {
+                Serial.println("[CMD_ERR] Usage: SET_RADAR_GATES <min_m> <max_m>");
+            }
+        } else {
+            Serial.println("[CMD_ERR] Usage: SET_RADAR_GATES <min_m> <max_m>");
+        }
+    } else if (upper.startsWith("SET_RADAR_ENERGY")) {
+        int spaceIdx = upper.indexOf(' ');
+        if (spaceIdx > 0) {
+            String rest = upper.substring(spaceIdx + 1);
+            rest.trim();
+            int secondSpace = rest.indexOf(' ');
+            if (secondSpace > 0) {
+                uint8_t moveE = (uint8_t)rest.substring(0, secondSpace).toInt();
+                uint8_t statE = (uint8_t)rest.substring(secondSpace + 1).toInt();
+                presenceSensor.setEnergyThresholds(moveE, statE);
+                Serial.printf("[CMD_OK] Radar energy thresholds set to Move=%u%% Stat=%u%%\n", moveE, statE);
+            } else {
+                Serial.println("[CMD_ERR] Usage: SET_RADAR_ENERGY <min_move> <min_stat>");
+            }
+        } else {
+            Serial.println("[CMD_ERR] Usage: SET_RADAR_ENERGY <min_move> <min_stat>");
+        }
+    } else if (upper.startsWith("SET_ABSENCE_TIMEOUT")) {
+        int spaceIdx = upper.indexOf(' ');
+        if (spaceIdx > 0) {
+            uint32_t to = upper.substring(spaceIdx + 1).toInt();
+            presenceSensor.setAbsenceTimeoutSeconds(to);
+            Serial.printf("[CMD_OK] Absence timeout set to %u seconds\n", to);
+        } else {
+            Serial.println("[CMD_ERR] Usage: SET_ABSENCE_TIMEOUT <seconds>");
+        }
+    } else if (upper.startsWith("SET_CLOSED_LOOP")) {
+        int spaceIdx = upper.indexOf(' ');
+        if (spaceIdx > 0) {
+            String val = upper.substring(spaceIdx + 1);
+            val.trim();
+            bool en = (val == "1" || val == "ON" || val == "TRUE");
+            closedLoopFeedback.setEnabled(en);
+            Serial.printf("[CMD_OK] Closed loop feedback %s\n", en ? "ENABLED" : "DISABLED");
+        } else {
+            Serial.println("[CMD_ERR] Usage: SET_CLOSED_LOOP <1|0>");
+        }
+    } else if (upper == "GET_CLOSED_LOOP") {
+        JsonDocument clDoc;
+        closedLoopFeedback.toJSON(clDoc);
+        String clOut;
+        serializeJson(clDoc, clOut);
+        Serial.println(clOut);
+    } else if (upper.startsWith("SET_COMFORT")) {
+        int spaceIdx = upper.indexOf(' ');
+        if (spaceIdx > 0) {
+            String val = upper.substring(spaceIdx + 1);
+            val.trim();
+            bool en = (val == "1" || val == "ON" || val == "TRUE");
+            automationEngine.setComfortIndexOptimization(en);
+            Serial.printf("[CMD_OK] Comfort index optimization %s\n", en ? "ENABLED" : "DISABLED");
+        } else {
+            Serial.println("[CMD_ERR] Usage: SET_COMFORT <1|0>");
+        }
     } else if (upper == "TEST_TX") {
         digitalWrite(STATUS_LED_PIN, HIGH);
         lastTxBlankingTime = millis();
@@ -454,6 +598,39 @@ void processCommand(const String& rawCmd) {
         safetyManager.recordPowerTransition(true, millis());
         digitalWrite(STATUS_LED_PIN, LOW);
         Serial.println("[CMD_OK] Transmitted Test Power ON frame (Cool, 25C, Auto Fan) with repeat");
+    } else if (upper.startsWith("SET_WIFI")) {
+        int spaceIdx = cmd.indexOf(' ');
+        if (spaceIdx > 0) {
+            String rest = cmd.substring(spaceIdx + 1);
+            rest.trim();
+            int secondSpace = rest.indexOf(' ');
+            String ssid = "";
+            String pass = "";
+            if (secondSpace > 0) {
+                ssid = rest.substring(0, secondSpace);
+                pass = rest.substring(secondSpace + 1);
+                pass.trim();
+            } else {
+                ssid = rest;
+            }
+            if (ssid.length() > 0) {
+                networkManager.configureWifi(ssid, pass);
+                Serial.printf("[CMD_OK] Configured Wi-Fi: %s\n", ssid.c_str());
+            } else {
+                Serial.println("[CMD_ERR] SSID cannot be empty");
+            }
+        } else {
+            Serial.println("[CMD_ERR] Usage: SET_WIFI <ssid> [password]");
+        }
+    } else if (upper == "WIFI_SCAN") {
+        std::vector<ac::network::ScannedNetwork> nets = networkManager.scanNetworks();
+        Serial.printf("[WIFI_SCAN] Found %d networks:\n", (int)nets.size());
+        for (const auto& n : nets) {
+            Serial.printf("  - %s (%d dBm, %s)\n", n.ssid.c_str(), (int)n.rssi, n.authMode.c_str());
+        }
+    } else if (upper == "WIFI_RESET") {
+        networkManager.resetWifiCredentials();
+        Serial.println("[CMD_OK] Wi-Fi credentials cleared, AP started");
     } else {
         Serial.printf("[CMD_UNKNOWN] Unrecognized command: %s\n", cmd.c_str());
     }
@@ -547,7 +724,11 @@ void loop() {
     // 5. Update Energy Monitoring Integration (accumulate continuously, refresh AC load model at 1Hz)
     static uint32_t lastEnergyModelUpdate = 0;
     uint32_t currentNow = millis();
+#if HAS_CURRENT_SENSOR
+    energyMonitor.sampleAdcCurrent(CURRENT_SENSOR_PIN, 30.0f);
+#endif
     energyMonitor.update(currentNow);
+    closedLoopFeedback.update(currentNow);
     if (currentNow - lastEnergyModelUpdate >= 1000) {
         lastEnergyModelUpdate = currentNow;
         float currentAmbientTemp = dhtDriver.getLatestReading().valid ? dhtDriver.getLatestReading().temperature_c : 25.0f;
@@ -616,7 +797,15 @@ void loop() {
         cloudDoc["presence_detection_enabled"] = automationEngine.isPresenceDetectionEnabled();
         cloudDoc["moving_energy"] = presenceSensor.getMovingEnergy();
         cloudDoc["stationary_energy"] = presenceSensor.getStationaryEnergy();
+        cloudDoc["radar_min_dist"] = presenceSensor.getMinDistanceM();
+        cloudDoc["radar_max_dist"] = presenceSensor.getMaxDistanceM();
+        cloudDoc["absence_timeout_s"] = presenceSensor.getAbsenceTimeoutSeconds();
+        cloudDoc["radar_in_zone"] = presenceSensor.isRawInZoneDetected();
         cloudDoc["power_watts"] = energyMonitor.getPowerWatts();
+        cloudDoc["power_tier"] = energyMonitor.getPowerTierStr();
+        cloudDoc["closed_loop_status"] = closedLoopFeedback.getStatusStr();
+        cloudDoc["closed_loop_retries"] = closedLoopFeedback.getRetryCount();
+        cloudDoc["comfort_opt"] = automationEngine.isComfortIndexOptimization();
         cloudDoc["voltage"] = energyMonitor.getVoltage();
         cloudDoc["current"] = energyMonitor.getCurrent();
         cloudDoc["energy_kwh_today"] = energyMonitor.getEnergyKwhToday();
@@ -624,8 +813,10 @@ void loop() {
         cloudDoc["tariff_rate"] = energyMonitor.getTariff();
         cloudDoc["ir_tx_installed"] = HAS_IR_TRANSMITTER;
         cloudDoc["ir_rx_installed"] = true;
-        cloudDoc["dht22_installed"] = true;
-        cloudDoc["local_ip"] = WiFi.localIP().toString();
+        cloudDoc["local_ip"] = networkManager.getIPAddress();
+        cloudDoc["wifi_ssid"] = networkManager.getSSID();
+        cloudDoc["wifi_rssi"] = networkManager.getRSSI();
+        cloudDoc["is_ap"] = networkManager.isAPMode();
         cloudDoc["timestamp_ms"] = millis();
 
         cloudClient.update(cloudDoc);
