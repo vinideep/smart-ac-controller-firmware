@@ -30,7 +30,7 @@ public:
     String getHostname() const { return _hostname; }
     String getSSID() const { return _ssid; }
 
-    void startAP(const char* apSsid = "AzureEssence-SmartAC", const char* apPass = "");
+    void startAP(const char* apSsid = "SmartController-Setup", const char* apPass = "");
     void stopAP();
 
     std::vector<ScannedNetwork> scanNetworks();

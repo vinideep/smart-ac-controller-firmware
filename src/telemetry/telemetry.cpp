@@ -61,7 +61,7 @@ void TelemetryManager::printDeviceInfo(const String& deviceId) {
     Serial.printf("  Phase 2: Climate Sensor - DHT22 on GPIO %d (Sample: %ums)\n", DHT_PIN, DHT_SAMPLE_INTERVAL_MS);
     Serial.printf("  Phase 3: IR Receiver    - 72-bit Azure Essence on GPIO %d\n", IR_RX_PIN);
     Serial.printf("  Phase 4: IR Transmitter - 38kHz Modulated on GPIO %d\n", IR_TX_PIN);
-    Serial.println("  Phase 5: AC Model       - Azure Essence Split Inverter Controller");
+    Serial.println("  Phase 5: AC Model       - Universal Smart Controller Engine");
     Serial.println("  Phase 6: State Machine  - Central ACState Manager & Serialization");
     Serial.printf("  Phase 7: Presence       - Obstacle/Proximity Sensor on GPIO %d\n", IR_OBSTACLE_PIN);
     Serial.println("  Phase 8: Energy Monitor - Isolated AC Real-Time Power/kWh/Cost Tracker");

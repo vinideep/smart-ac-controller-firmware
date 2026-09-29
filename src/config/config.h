@@ -3,7 +3,7 @@
 
 /**
  * @file config.h
- * @brief System-wide configuration constants for Azure Essence Smart AC Controller.
+ * @brief System-wide configuration constants for Universal Smart Controller.
  */
 
 #ifndef FIRMWARE_VERSION
@@ -11,7 +11,7 @@
 #endif
 
 #ifndef DEVICE_MODEL
-#define DEVICE_MODEL "AzureEssence-SmartAC"
+#define DEVICE_MODEL "SmartController"
 #endif
 
 #ifndef MONITOR_BAUD_RATE

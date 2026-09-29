@@ -89,7 +89,7 @@ void LocalAPIServer::handleRoot() {
 <html lang="en">
 <head>
   <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Azure Essence Smart AC</title>
+  <title>Smart Controller</title>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; }
     body { background: #0f172a; color: #f8fafc; padding: 16px; display: flex; justify-content: center; }
@@ -135,10 +135,10 @@ void LocalAPIServer::handleRoot() {
   <div style="max-width: 440px; width: 100%;">
     <div class="card">
       <div style="text-align: center;">
-        <span id="wifiBadge" class="badge badge-ap">AP Mode: AzureEssence-SmartAC</span>
+        <span id="wifiBadge" class="badge badge-ap">AP Mode: SmartController-Setup</span>
       </div>
-      <h1>Azure Essence AE-18</h1>
-      <div class="sub">Autonomous Smart AC Controller</div>
+      <h1>Smart Controller</h1>
+      <div class="sub">Universal Smart AC Controller</div>
 
       <!-- Live Climate Metrics -->
       <div class="grid">
@@ -218,7 +218,7 @@ void LocalAPIServer::handleRoot() {
         if (d.system) {
           if (d.system.is_ap) {
             b.className = 'badge badge-ap';
-            b.innerText = 'AP Mode: AzureEssence-SmartAC (192.168.4.1)';
+            b.innerText = 'AP Mode: SmartController-Setup (192.168.4.1)';
           } else {
             b.className = 'badge badge-sta';
             b.innerText = 'Connected: ' + (d.system.ip || 'Wi-Fi') + ' (' + d.system.rssi + ' dBm)';
