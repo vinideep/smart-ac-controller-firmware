@@ -124,8 +124,9 @@ struct ACState {
 struct AutomationConfig {
     bool enabled = false;
     float targetTemperature = 25.0f;
-    float hysteresis = 1.0f;
+    float hysteresis = 1.5f;
     uint32_t emptyTimeoutSeconds = 900;
+    bool continuousInverterMode = true;
 };
 
 // ==============================================================================
@@ -153,7 +154,7 @@ uint8_t consecutiveErrors = 0;
 
 // Safety manager timers
 constexpr uint32_t kMinOnTimeMs = 180000;    // 3 minutes min compressor on
-constexpr uint32_t kMinOffTimeMs = 180000;   // 3 minutes min compressor off
+constexpr uint32_t kMinOffTimeMs = 300000;   // 5 minutes min compressor off
 constexpr uint32_t kMinCmdThrottleMs = 5000; // 5 seconds between commands
 uint32_t lastTurnOnMs = 0;
 uint32_t lastTurnOffMs = 0;
@@ -502,14 +503,18 @@ void updateAutomationEngine() {
         return;
     }
 
-    // Rule 3: Turn off if target reached
+    // Rule 3: Target reached in cooling mode
+    // In continuous inverter mode (default): Keep AC running! Inverter compressor idles down to maintain setpoint.
+    // In legacy cycling mode: Cut master power when target is achieved.
     if (acState.power && isPresent && curTemp < (autoConfig.targetTemperature - autoConfig.hysteresis)) {
-        const char* reason = nullptr;
-        if (canTurnOff(now, reason)) {
-            acState.power = false;
-            transmitAzureState(acState);
-            recordPowerTransition(false, now);
-            Serial.printf("[AUTO] Target temperature achieved (%.1fC) -> AC turned OFF\n", curTemp);
+        if (!autoConfig.continuousInverterMode) {
+            const char* reason = nullptr;
+            if (canTurnOff(now, reason)) {
+                acState.power = false;
+                transmitAzureState(acState);
+                recordPowerTransition(false, now);
+                Serial.printf("[AUTO] Target temperature achieved (%.1fC) -> AC turned OFF\n", curTemp);
+            }
         }
     }
 }

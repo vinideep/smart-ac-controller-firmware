@@ -42,12 +42,28 @@ bool PresenceSensorDriver::parseFrame(const uint8_t* buf, size_t len) {
         return false;
     }
 
-    uint8_t targetState = buf[7];
-    uint16_t moveDist = buf[8] | (buf[9] << 8);
-    uint8_t moveEnergy = buf[10];
-    uint16_t statDist = buf[11] | (buf[12] << 8);
-    uint8_t statEnergy = buf[13];
-    uint16_t detectDist = buf[14] | (buf[15] << 8);
+    _lastFrameLen = len < sizeof(_lastFrame) ? len : sizeof(_lastFrame);
+    memcpy(_lastFrame, buf, _lastFrameLen);
+
+    // Locate payload start (scan for 0xAA marker between index 6 and 9)
+    size_t payloadStart = 6;
+    for (size_t i = 6; i < 10 && i < len; i++) {
+        if (buf[i] == 0xAA) {
+            payloadStart = i + 1;
+            break;
+        }
+    }
+
+    if (payloadStart + 7 > len) {
+        return false;
+    }
+
+    uint8_t targetState = buf[payloadStart];
+    _lastTargetState = targetState;
+    uint16_t moveDist = buf[payloadStart + 1] | (buf[payloadStart + 2] << 8);
+    uint8_t moveEnergy = buf[payloadStart + 3];
+    uint16_t statDist = buf[payloadStart + 4] | (buf[payloadStart + 5] << 8);
+    uint8_t statEnergy = buf[payloadStart + 6];
 
     _reading.moving_distance_cm = moveDist;
     _reading.moving_energy = moveEnergy;
@@ -84,7 +100,9 @@ bool PresenceSensorDriver::parseFrame(const uint8_t* buf, size_t len) {
         _rawInZoneDetected = false;
         _reading.target_count = 0;
         _reading.motion_state = (targetState != 0x00) ? "Filtered Out-of-Zone" : "None";
-        _reading.distance_m = 0.0f;
+        if (_reading.distance_m > _maxDistanceM || _reading.distance_m < _minDistanceM) {
+            _reading.distance_m = 0.0f;
+        }
     }
 
     return true;
@@ -146,7 +164,7 @@ bool PresenceSensorDriver::update() {
 
     processUart();
 
-    bool uartActive = (_lastUartFrameTime > 0 && (now - _lastUartFrameTime < 2500));
+    bool uartActive = isUartActive() || (_totalUartBytes > 50);
 
     if (uartActive) {
         if (_rawInZoneDetected) {
@@ -156,8 +174,14 @@ bool PresenceSensorDriver::update() {
             // Asymmetric Debounce: hold active presence until absence timeout expires
             if (_lastPresenceDetectedMs == 0 || (now - _lastPresenceDetectedMs >= _absenceTimeoutMs)) {
                 _reading.present = false;
+                _reading.distance_m = 0.0f;
+                _reading.motion_state = "Room Empty";
+                _reading.target_count = 0;
             } else {
                 _reading.present = true;
+                if (_reading.motion_state == nullptr || strcmp(_reading.motion_state, "None") == 0) {
+                    _reading.motion_state = "Stationary / Human Present (Debounce Hold)";
+                }
             }
         }
     } else {
@@ -177,9 +201,9 @@ bool PresenceSensorDriver::update() {
             if (detected) {
                 _lastPresenceDetectedMs = now;
                 _reading.present = true;
-                _reading.motion_state = "Micro-motion / Human Present";
+                _reading.motion_state = "Binary Presence (GPIO 26)";
                 _reading.target_count = 1;
-                _reading.distance_m = 1.8f;
+                _reading.distance_m = 0.0f;
             } else {
                 if (_lastPresenceDetectedMs == 0 || (now - _lastPresenceDetectedMs >= _absenceTimeoutMs)) {
                     _reading.present = false;
@@ -276,11 +300,13 @@ void PresenceSensorDriver::toJSON(JsonDocument& doc) const {
 }
 
 void PresenceSensorDriver::printDebug(Print& out) {
-    out.printf("[RADAR_DBG] totalBytes=%u, rxLen=%u, uartActive=%d, lastFrameAgo=%ums\n",
-               _totalUartBytes, _rxLen, isUartActive(), _lastUartFrameTime > 0 ? (millis() - _lastUartFrameTime) : 0);
-    out.print("[RADAR_DBG] buffer: ");
-    for (size_t k = 0; k < _rxLen && k < 32; k++) {
-        out.printf("%02X ", _rxBuf[k]);
+    out.printf("[RADAR_DBG] totalBytes=%u, rxLen=%u, uartActive=%d, lastFrameAgo=%ums, inZone=%d, dist=%.2fm, targetState=%u, moveDist=%ucm, moveE=%u, statDist=%ucm, statE=%u\n",
+               _totalUartBytes, _rxLen, isUartActive(), _lastUartFrameTime > 0 ? (millis() - _lastUartFrameTime) : 0,
+               _rawInZoneDetected, _reading.distance_m, _lastTargetState, _reading.moving_distance_cm, _reading.moving_energy,
+               _reading.stationary_distance_cm, _reading.stationary_energy);
+    out.print("[RADAR_DBG] lastFrame: ");
+    for (size_t k = 0; k < _lastFrameLen && k < 24; k++) {
+        out.printf("%02X ", _lastFrame[k]);
     }
     out.println();
 }

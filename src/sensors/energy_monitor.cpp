@@ -160,9 +160,9 @@ void EnergyMonitor::updateFromAcState(bool isPowered,
         compressorPower = 550.0f;
     }
 
-    // Operational limits of 1.5-ton inverter unit: 500W min - 1800W max
+    // Operational limits of 1.5-ton inverter unit: 500W min - 1920W max (2000W peak total load)
     if (compressorPower < 500.0f) compressorPower = 500.0f;
-    if (compressorPower > 1800.0f) compressorPower = 1800.0f;
+    if (compressorPower > 1920.0f) compressorPower = 1920.0f;
 
     _reading.power_watts = compressorPower + fanPower;
     _reading.current = _reading.power_watts / (_reading.voltage * _reading.power_factor);

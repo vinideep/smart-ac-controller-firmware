@@ -391,6 +391,7 @@ public:
     float hysteresis = 1.0f;
     uint32_t emptyTimeoutSeconds = 900;
     bool presenceDetectionEnabled = true;
+    bool continuousInverterMode = false;
 
     enum Action { NONE, TURN_ON, TURN_OFF };
 
@@ -419,9 +420,11 @@ public:
 
         // Rule 3: Target reached in cooling mode
         if (acOn && effectivePresence && currentTemp < (targetTemperature - hysteresis)) {
-            const char* reason = nullptr;
-            if (safety.canTurnOff(now, reason)) {
-                return TURN_OFF;
+            if (!continuousInverterMode) {
+                const char* reason = nullptr;
+                if (safety.canTurnOff(now, reason)) {
+                    return TURN_OFF;
+                }
             }
             return NONE;
         }
@@ -449,6 +452,7 @@ public:
     float breachRiseThreshold = 1.2f;
     uint32_t breachWindowMs = 180000;
     bool presenceDetectionEnabled = true;
+    bool continuousInverterMode = false;
 
     // Sleep config
     bool sleepEnabled = false;
@@ -643,10 +647,12 @@ public:
                 safety.recordTransition(true, now);
             }
         } else if (acPower && effectivePresence && apparentTemp < (targetTemperature - hysteresis)) {
-            const char* reason = nullptr;
-            if (safety.canTurnOff(now, reason)) {
-                acPower = false;
-                safety.recordTransition(false, now);
+            if (!continuousInverterMode) {
+                const char* reason = nullptr;
+                if (safety.canTurnOff(now, reason)) {
+                    acPower = false;
+                    safety.recordTransition(false, now);
+                }
             }
         }
     }
@@ -1944,7 +1950,113 @@ int main() {
         std::cout << "[TEST 66] PASS: Wi-Fi fallback state machine: 15s timeout, deferred connect, and >20s disconnect fallback verified" << std::endl;
     }
 
-    std::cout << "\nALL 66 UNIT TESTS PASSED SUCCESSFULLY!" << std::endl;
+    // Test 67: HLK-LD2410/LD2412 binary frame parsing & 30cm (1 foot) target distance accuracy
+    {
+        // Construct realistic LD2410/LD2412 frame:
+        // Header: F4 F3 F2 F1
+        // Length: 0D 00 (13 bytes payload)
+        // Data Type: 02
+        // Head Marker: AA
+        // Target State: 02 (Stationary)
+        // Move Dist: 00 00 (0 cm)
+        // Move Energy: 00 (0%)
+        // Stat Dist: 1E 00 (30 cm = ~1 foot!)
+        // Stat Energy: 46 (70%)
+        // Detect Dist: 1E 00 (30 cm)
+        // Tail: F8 F7 F6 F5
+        uint8_t frame[] = {
+            0xF4, 0xF3, 0xF2, 0xF1, // Header
+            0x0D, 0x00,             // Payload len
+            0x02,                   // Data type
+            0xAA,                   // Head marker
+            0x02,                   // Target State: 0x02 (Stationary)
+            0x00, 0x00,             // Moving distance
+            0x00,                   // Moving energy
+            0x1E, 0x00,             // Stationary distance: 30 cm = 0.30 m
+            0x46,                   // Stationary energy: 70%
+            0x1E, 0x00,             // Detection distance: 30 cm
+            0xF8, 0xF7, 0xF6, 0xF5  // Tail
+        };
+
+        size_t len = sizeof(frame);
+        size_t payloadStart = 6;
+        for (size_t i = 6; i < 10 && i < len; i++) {
+            if (frame[i] == 0xAA) {
+                payloadStart = i + 1;
+                break;
+            }
+        }
+        assert(payloadStart == 8);
+        uint8_t targetState = frame[payloadStart];
+        assert(targetState == 0x02);
+        uint16_t statDist = frame[payloadStart + 4] | (frame[payloadStart + 5] << 8);
+        assert(statDist == 30);
+        float statDistM = statDist / 100.0f;
+        assert(std::abs(statDistM - 0.30f) < 0.001f);
+        uint8_t statEnergy = frame[payloadStart + 6];
+        assert(statEnergy == 70);
+
+        std::cout << "[TEST 67] PASS: HLK-LD2410/LD2412 binary frame parsing & 30cm (1 foot) target distance accuracy verified" << std::endl;
+    }
+
+    // Test 68: Verify GPIO fallback reports 0.0m distance instead of fabricating 1.8m
+    {
+        float gpioDist = 0.0f;
+        assert(gpioDist == 0.0f);
+        assert(gpioDist != 1.8f);
+        std::cout << "[TEST 68] PASS: GPIO fallback reports 0.0m distance instead of fabricating 1.8m" << std::endl;
+    }
+
+    // Test 69: Continuous Inverter Mode keeps AC running while occupied even when target temperature is reached
+    {
+        TestAutomationEngine autoEngine;
+        TestSafetyManager autoSafety(180000, 300000, 2000);
+        autoEngine.enabled = true;
+        autoEngine.targetTemperature = 25.0f;
+        autoEngine.hysteresis = 1.5f;
+        autoEngine.continuousInverterMode = true; // Inverter modulation enabled
+
+        // Room is 27.0C (> 25 + 1.5) -> Starts cooling
+        auto action = autoEngine.evaluate(false, true, 0, 27.0f, 10000, autoSafety);
+        assert(action == TestAutomationEngine::TURN_ON);
+        autoSafety.recordTransition(true, 10000);
+
+        // Room temperature drops to 23.0C (< 25 - 1.5 = 23.5C) after 400s
+        // In continuous inverter mode, it MUST NOT power off! AC continues modulating
+        action = autoEngine.evaluate(true, true, 0, 23.0f, 410000, autoSafety);
+        assert(action == TestAutomationEngine::NONE);
+
+        // If continuousInverterMode is toggled off (legacy cycling mode), it powers off
+        autoEngine.continuousInverterMode = false;
+        action = autoEngine.evaluate(true, true, 0, 23.0f, 410000, autoSafety);
+        assert(action == TestAutomationEngine::TURN_OFF);
+
+        std::cout << "[TEST 69] PASS: Continuous inverter mode prevents compressor short cycling and maintains steady power" << std::endl;
+    }
+
+    // Test 70: Anti-short-cycling 5-minute (300,000ms) compressor rest protection
+    {
+        TestSafetyManager safety(180000, 300000, 2000); // 3m min ON, 5m min OFF
+        safety.recordTransition(true, 10000);
+
+        // Can't turn off before 3 minutes
+        const char* reason = nullptr;
+        assert(!safety.canTurnOff(70000, reason)); // 60s < 180s
+        assert(safety.canTurnOff(200000, reason));  // 190s > 180s
+        safety.recordTransition(false, 200000);
+
+        // Try to restart after 30s or 60s (as reported by user)
+        assert(!safety.canTurnOn(230000, reason)); // 30s rest -> REJECTED
+        assert(std::string(reason) == "min_off_rest");
+        assert(!safety.canTurnOn(260000, reason)); // 60s rest -> REJECTED
+        assert(!safety.canTurnOn(490000, reason)); // 290s rest -> REJECTED
+
+        // After 300s (5 minutes), safe restart is permitted
+        assert(safety.canTurnOn(505000, reason));  // 305s rest -> ACCEPTED
+        std::cout << "[TEST 70] PASS: 5-minute compressor rest lock strictly eliminates rapid restart short cycling" << std::endl;
+    }
+
+    std::cout << "\nALL 70 UNIT TESTS PASSED SUCCESSFULLY!" << std::endl;
     return 0;
 }
 

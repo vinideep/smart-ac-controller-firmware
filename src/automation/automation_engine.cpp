@@ -29,6 +29,7 @@ void AutomationEngine::loadFromNVS() {
         _config.dryModeHumidityThreshold = prefs.getFloat("dry_th", _config.dryModeHumidityThreshold);
         _config.thermalBreachProtection = prefs.getBool("breach_en", _config.thermalBreachProtection);
         _config.presenceDetectionEnabled = prefs.getBool("pres_en", _config.presenceDetectionEnabled);
+        _config.continuousInverterMode = prefs.getBool("inv_mode", _config.continuousInverterMode);
         prefs.end();
     }
 #endif
@@ -50,6 +51,7 @@ void AutomationEngine::saveToNVS() {
         prefs.putFloat("dry_th", _config.dryModeHumidityThreshold);
         prefs.putBool("breach_en", _config.thermalBreachProtection);
         prefs.putBool("pres_en", _config.presenceDetectionEnabled);
+        prefs.putBool("inv_mode", _config.continuousInverterMode);
         prefs.end();
     }
 #endif
@@ -126,6 +128,12 @@ void AutomationEngine::setPresenceDetectionEnabled(bool enable) {
     _config.presenceDetectionEnabled = enable;
     saveToNVS();
     logEvent(enable ? "presence_guard_enabled" : "presence_guard_disabled", "config_update", _dht.getLatestReading().temperature_c);
+}
+
+void AutomationEngine::setContinuousInverterMode(bool enable) {
+    _config.continuousInverterMode = enable;
+    saveToNVS();
+    logEvent(enable ? "inverter_mode_enabled" : "cycling_mode_enabled", "config_update", _dht.getLatestReading().temperature_c);
 }
 
 void AutomationEngine::setCircadianSleep(bool enable, uint8_t pulldown, float ramp, float maxTemp) {
@@ -411,7 +419,18 @@ void AutomationEngine::update() {
         }
     }
 
-    // 5. Standard Closed-Loop Thermal Regulation (Heat-Index or Raw Temp)
+    // 5. Freeze Protection: Safety cutoff if room temperature drops below 18C
+    if (acOn && currentTemp < 18.0f) {
+        const char* reason = nullptr;
+        if (_safety.canTurnOff(now, reason)) {
+            _ac.setPower(false, "freeze_protection_cutoff");
+            _safety.recordPowerTransition(false, now);
+            logEvent("power_off", "room_below_freeze_limit", currentTemp);
+        }
+        return;
+    }
+
+    // 6. Standard Closed-Loop Thermal Regulation (Heat-Index or Raw Temp)
     // Rule: Room hotter than target threshold -> turn ON
     if (!acOn && effectivePresence && apparentTemp > (_config.targetTemperature + _config.hysteresis)) {
         const char* reason = nullptr;
@@ -423,13 +442,17 @@ void AutomationEngine::update() {
         return;
     }
 
-    // Rule: Room colder than target threshold -> turn OFF
+    // Rule: Room colder than target threshold
+    // In continuous inverter mode (default): Keep AC running! Inverter compressor idles down to maintain setpoint.
+    // In legacy cycling mode: Cut master power when target is achieved.
     if (acOn && effectivePresence && apparentTemp < (_config.targetTemperature - _config.hysteresis)) {
-        const char* reason = nullptr;
-        if (_safety.canTurnOff(now, reason)) {
-            _ac.setPower(false, "automation_target_reached");
-            _safety.recordPowerTransition(false, now);
-            logEvent("power_off", "target_temperature_reached", currentTemp);
+        if (!_config.continuousInverterMode) {
+            const char* reason = nullptr;
+            if (_safety.canTurnOff(now, reason)) {
+                _ac.setPower(false, "automation_target_reached");
+                _safety.recordPowerTransition(false, now);
+                logEvent("power_off", "target_temperature_reached", currentTemp);
+            }
         }
     }
 }
@@ -470,6 +493,7 @@ void AutomationEngine::toJSON(JsonDocument& doc) const {
     doc["sleep_enabled"] = _config.sleepConfig.enabled;
     doc["presence_detection_enabled"] = _config.presenceDetectionEnabled;
     doc["comfort_index_optimization"] = _config.comfortIndexOptimization;
+    doc["continuous_inverter_mode"] = _config.continuousInverterMode;
 }
 
 } // namespace ac::automation

@@ -23,7 +23,7 @@ ac::sensors::EnergyMonitor energyMonitor(8.0f, 230.0f); // Configurable tariff â
 ac::ir::IRReceiverDriver irReceiver(IR_RX_PIN, ac::ir::kCaptureBufferSize, ac::ir::kTimeout);
 ac::control::AzureEssenceController acController(IR_TX_PIN);
 ac::control::ClosedLoopFeedback closedLoopFeedback(acController, energyMonitor);
-ac::safety::SafetyManager safetyManager(10000, 10000, 2000); // 10s min on/off for automation, 2s throttle
+ac::safety::SafetyManager safetyManager(180000, 300000, 2000); // 3m min ON, 5m min OFF compressor protection, 2s throttle
 ac::automation::AutomationEngine automationEngine(acController, safetyManager, presenceSensor, dhtDriver);
 // Device identity
 String deviceId;

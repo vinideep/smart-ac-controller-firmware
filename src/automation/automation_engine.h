@@ -36,7 +36,7 @@ struct AutomationConfig {
     bool enabled = false;
     float targetTemperature = 25.0f;
     float baseTargetTemp = 25.0f;
-    float hysteresis = 1.0f;
+    float hysteresis = 1.5f;
     uint32_t ecoDriftTimeoutSeconds = 300;   // 5 minutes
     uint32_t emptyTimeoutSeconds = 900;       // 15 minutes
     uint32_t evalIntervalMs = 5000;           // Evaluate every 5 seconds
@@ -49,6 +49,7 @@ struct AutomationConfig {
     float breachRiseThreshold = 1.2f;
     uint32_t breachWindowMs = 180000;         // 3 minutes (180s)
     bool presenceDetectionEnabled = false;    // When false, regulates climate without waiting for presence sensor
+    bool continuousInverterMode = true;       // Keeps AC running and modulates setpoint instead of hard power cycling
 
     CircadianSleepConfig sleepConfig;
 };
@@ -109,6 +110,9 @@ public:
 
     void setPresenceDetectionEnabled(bool enable);
     bool isPresenceDetectionEnabled() const { return _config.presenceDetectionEnabled; }
+
+    void setContinuousInverterMode(bool enable);
+    bool isContinuousInverterMode() const { return _config.continuousInverterMode; }
 
     void loadFromNVS();
     void saveToNVS();

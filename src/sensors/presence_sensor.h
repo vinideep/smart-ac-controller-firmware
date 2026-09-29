@@ -87,6 +87,9 @@ private:
 
     uint8_t _rxBuf[128];
     size_t _rxLen = 0;
+    uint8_t _lastFrame[32] = {0};
+    size_t _lastFrameLen = 0;
+    uint8_t _lastTargetState = 0;
 };
 
 } // namespace ac::sensors
