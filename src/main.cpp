@@ -809,6 +809,7 @@ void loop() {
         cloudDoc["voltage"] = energyMonitor.getVoltage();
         cloudDoc["current"] = energyMonitor.getCurrent();
         cloudDoc["energy_kwh_today"] = energyMonitor.getEnergyKwhToday();
+        cloudDoc["energy_units_today"] = energyMonitor.getEnergyKwhToday();
         cloudDoc["estimated_cost_today"] = energyMonitor.getEstimatedCostToday();
         cloudDoc["tariff_rate"] = energyMonitor.getTariff();
         cloudDoc["ir_tx_installed"] = HAS_IR_TRANSMITTER;

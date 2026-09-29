@@ -179,6 +179,7 @@ void TelemetryManager::printEnergyJSON(const ac::sensors::EnergyReading& energy,
     doc["power_watts"] = round(energy.power_watts * 10.0f) / 10.0f;
     doc["power_factor"] = round(energy.power_factor * 100.0f) / 100.0f;
     doc["energy_kwh_today"] = round(energy.energy_kwh_today * 10000.0f) / 10000.0f;
+    doc["energy_units_today"] = round(energy.energy_kwh_today * 10000.0f) / 10000.0f;
     doc["tariff_rate"] = round(energy.tariff_rate * 100.0f) / 100.0f;
     doc["estimated_cost_today"] = round(energy.estimated_cost_today * 100.0f) / 100.0f;
     doc["status"] = energy.status;

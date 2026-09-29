@@ -305,7 +305,7 @@ public:
         }
 
         if (compressorPower < 500.0f) compressorPower = 500.0f;
-        if (compressorPower > 1800.0f) compressorPower = 1800.0f;
+        if (compressorPower > 1920.0f) compressorPower = 1920.0f;
 
         _reading.power_watts = compressorPower + fanPower;
         _reading.current = _reading.power_watts / (_reading.voltage * _reading.power_factor);
@@ -318,6 +318,7 @@ public:
            << ",\"power_watts\":" << std::setprecision(1) << _reading.power_watts
            << ",\"power_factor\":" << std::setprecision(2) << _reading.power_factor
            << ",\"energy_kwh_today\":" << std::setprecision(4) << _reading.energy_kwh_today
+           << ",\"energy_units_today\":" << std::setprecision(4) << _reading.energy_kwh_today
            << ",\"tariff_rate\":" << std::setprecision(2) << _reading.tariff_rate
            << ",\"estimated_cost_today\":" << std::setprecision(2) << _reading.estimated_cost_today
            << ",\"status\":\"" << _reading.status << "\""
@@ -944,6 +945,7 @@ int main() {
     assert(jsonStr.find("\"power_watts\":") != std::string::npos);
     assert(jsonStr.find("\"power_factor\":") != std::string::npos);
     assert(jsonStr.find("\"energy_kwh_today\":") != std::string::npos);
+    assert(jsonStr.find("\"energy_units_today\":") != std::string::npos);
     assert(jsonStr.find("\"tariff_rate\":") != std::string::npos);
     assert(jsonStr.find("\"estimated_cost_today\":") != std::string::npos);
     assert(jsonStr.find("\"status\":") != std::string::npos);
@@ -2056,7 +2058,27 @@ int main() {
         std::cout << "[TEST 70] PASS: 5-minute compressor rest lock strictly eliminates rapid restart short cycling" << std::endl;
     }
 
-    std::cout << "\nALL 70 UNIT TESTS PASSED SUCCESSFULLY!" << std::endl;
+    // Test 71: Pulldown benchmark verification (1 Unit = 1 kWh in 30 minutes at 2000W)
+    {
+        TestEnergyMonitor energyBenchmark(8.0f, 230.0f);
+        energyBenchmark.begin(0);
+        // High load: 2000W active power (1920W compressor + 80W high fan)
+        energyBenchmark.updateMeasurement(230.0f, 8.96f, 2000.0f, 0.97f, "pulldown", 0);
+        const TestEnergyReading& rStart = energyBenchmark.getReading();
+        assert(rStart.power_watts == 2000.0f);
+        // Current: P / (V * PF) = 2000 / (230 * 0.97) = 8.964 A
+        float expectedCurrent = 2000.0f / (230.0f * 0.97f);
+        assert(std::fabs(rStart.current - expectedCurrent) < 0.05f);
+
+        // Advance exactly 30 minutes (1,800,000 ms = 0.5 hours)
+        energyBenchmark.update(1800000UL);
+        const TestEnergyReading& r30Min = energyBenchmark.getReading();
+        // 2000W * 0.5h = 1000 Wh = 1.000 kWh = 1.000 Unit
+        assert(std::fabs(r30Min.energy_kwh_today - 1.0f) < 0.001f);
+        std::cout << "[TEST 71] PASS: 2000W AC pulldown consumes exactly 1.0 Unit (1.0 kWh) in 30 minutes (I = 8.96A)" << std::endl;
+    }
+
+    std::cout << "\nALL 71 UNIT TESTS PASSED SUCCESSFULLY!" << std::endl;
     return 0;
 }
 

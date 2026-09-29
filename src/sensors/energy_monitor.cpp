@@ -216,6 +216,7 @@ void EnergyMonitor::toJSON(JsonDocument& doc) const {
     doc["hardware_meter"] = _hardwareSensorActive;
     doc["power_factor"] = round(_reading.power_factor * 100.0f) / 100.0f;
     doc["energy_kwh_today"] = round(_reading.energy_kwh_today * 10000.0f) / 10000.0f;
+    doc["energy_units_today"] = round(_reading.energy_kwh_today * 10000.0f) / 10000.0f;
     doc["tariff_rate"] = round(_reading.tariff_rate * 100.0f) / 100.0f;
     doc["estimated_cost_today"] = round(_reading.estimated_cost_today * 100.0f) / 100.0f;
     doc["status"] = _reading.status;
