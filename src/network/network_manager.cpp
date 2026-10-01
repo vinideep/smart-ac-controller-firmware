@@ -147,9 +147,9 @@ void NetworkManager::update() {
         uint32_t now = millis();
 
         // 1. Check for initial or configuration connection timeout
-        if (_connecting && (now - _connectStartTime > 15000)) {
+        if (_connecting && (now - _connectStartTime > 25000)) {
             _connecting = false;
-            Serial.printf("[WIFI_WARN] Connection attempt to '%s' timed out (>15s).\n", _ssid.c_str());
+            Serial.printf("[WIFI_WARN] Connection attempt to '%s' timed out (>25s).\n", _ssid.c_str());
             if (!_isAPMode) {
                 Serial.println("[WIFI] Launching Captive Portal AP fallback...");
                 startAP();
@@ -160,18 +160,23 @@ void NetworkManager::update() {
         if (!_isAPMode && !_connecting) {
             if (_disconnectedSince == 0) {
                 _disconnectedSince = now;
-            } else if (now - _disconnectedSince > 20000) {
-                Serial.println("[WIFI_WARN] Wi-Fi lost for >20s. Starting Captive Portal AP fallback...");
+            } else if (now - _disconnectedSince > 25000) {
+                Serial.println("[WIFI_WARN] Wi-Fi lost for >25s. Starting Captive Portal AP fallback...");
                 startAP();
                 _disconnectedSince = 0;
             }
         }
 
-        // 3. Periodic reconnect: ONLY when NOT in AP mode to prevent disrupting SoftAP clients
-        if (!_isAPMode && _ssid.length() > 0 && (now - _lastReconnectAttempt > 15000)) {
+        // 3. Periodic reconnect: safely attempt reconnection every 25s if credentials exist
+        if (_ssid.length() > 0 && !_connecting && (now - _lastReconnectAttempt > 25000)) {
             _lastReconnectAttempt = now;
-            Serial.printf("[WIFI] Re-attempting connection to %s...\n", _ssid.c_str());
+            if (_isAPMode) {
+                if (WiFi.getMode() != WIFI_AP_STA) WiFi.mode(WIFI_AP_STA);
+            }
+            Serial.printf("[WIFI] Attempting connection to SSID '%s'...\n", _ssid.c_str());
             WiFi.begin(_ssid.c_str(), _password.c_str());
+            _connecting = true;
+            _connectStartTime = now;
         }
     }
 }
