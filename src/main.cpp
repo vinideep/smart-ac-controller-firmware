@@ -15,6 +15,7 @@
 #include "network/network_manager.h"
 #include "network/cloud_client.h"
 #include "api/local_api.h"
+#include "ota/ota_manager.h"
 
 // Hardware driver and subsystem instances (All 9 Phases)
 DHTDriver dhtDriver(DHT_PIN, DHT_TYPE);
@@ -289,6 +290,16 @@ void processCommand(const String& rawCmd) {
             } else if (strcmp(commandType, "wifi_reset") == 0) {
                 networkManager.resetWifiCredentials();
                 Serial.println("[CMD_OK] Wi-Fi credentials reset to defaults");
+            } else if (strcmp(commandType, "ota_flash") == 0 || strcmp(commandType, "ota_update") == 0 || strcmp(commandType, "ota_start") == 0) {
+                const char* otaUrl = doc["url"] | "";
+                const char* md5 = doc["md5"] | "";
+                const char* ver = doc["version"] | "";
+                Serial.printf("[OTA] Firmware update requested. URL: %s | MD5: %s | Ver: %s\n", otaUrl, md5, ver);
+                if (strlen(otaUrl) > 0) {
+                    ac::ota::OtaManager::performOta(String(otaUrl), String(md5));
+                } else {
+                    Serial.println("[OTA] Standby: Firmware staged. Awaiting binary stream pull.");
+                }
             }
             return;
         }
