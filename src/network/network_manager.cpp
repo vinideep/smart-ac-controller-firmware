@@ -149,6 +149,7 @@ void NetworkManager::update() {
         // 1. Check for initial or configuration connection timeout
         if (_connecting && (now - _connectStartTime > 25000)) {
             _connecting = false;
+            _lastReconnectAttempt = now;
             Serial.printf("[WIFI_WARN] Connection attempt to '%s' timed out (>25s).\n", _ssid.c_str());
             if (!_isAPMode) {
                 Serial.println("[WIFI] Launching Captive Portal AP fallback...");
@@ -167,13 +168,16 @@ void NetworkManager::update() {
             }
         }
 
-        // 3. Periodic reconnect: safely attempt reconnection every 25s if credentials exist
-        if (_ssid.length() > 0 && !_connecting && (now - _lastReconnectAttempt > 25000)) {
+        // 3. Periodic reconnect: safely attempt reconnection if credentials exist
+        uint32_t reconnectInterval = _isAPMode ? 60000 : 30000;
+        if (_ssid.length() > 0 && !_connecting && (now - _lastReconnectAttempt > reconnectInterval)) {
             _lastReconnectAttempt = now;
             if (_isAPMode) {
                 if (WiFi.getMode() != WIFI_AP_STA) WiFi.mode(WIFI_AP_STA);
             }
             Serial.printf("[WIFI] Attempting connection to SSID '%s'...\n", _ssid.c_str());
+            WiFi.disconnect(false, false);
+            delay(50);
             WiFi.begin(_ssid.c_str(), _password.c_str());
             _connecting = true;
             _connectStartTime = now;
@@ -188,10 +192,19 @@ std::vector<ScannedNetwork> NetworkManager::scanNetworks() {
     if (currentMode == WIFI_MODE_NULL || currentMode == WIFI_MODE_AP) {
         WiFi.mode(WIFI_AP_STA);
         delay(100);
+    } else if (WiFi.status() != WL_CONNECTED) {
+        WiFi.disconnect(false, false);
+        delay(100);
     }
 
     Serial.println("[WIFI] Scanning for available networks...");
     int16_t n = WiFi.scanNetworks(false, false);
+    if (n < 0) {
+        Serial.printf("[WIFI_WARN] Scan failed with code %d. Resetting STA and retrying...\n", n);
+        WiFi.disconnect(false, false);
+        delay(200);
+        n = WiFi.scanNetworks(false, false);
+    }
     Serial.printf("[WIFI] Scan finished, found %d networks\n", n);
 
     if (n > 0) {

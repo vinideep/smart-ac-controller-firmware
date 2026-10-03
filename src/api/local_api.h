@@ -30,7 +30,7 @@ private:
     sensors::PresenceSensorDriver& _presence;
     safety::SafetyManager& _safety;
     network::NetworkManager& _network;
-    String _deviceId;
+    const String& _deviceId;
 
     void setupRoutes();
     void sendCORS();
