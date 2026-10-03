@@ -197,13 +197,14 @@ std::vector<ScannedNetwork> NetworkManager::scanNetworks() {
         delay(100);
     }
 
-    Serial.println("[WIFI] Scanning for available networks...");
-    int16_t n = WiFi.scanNetworks(false, false);
+    WiFi.setSleep(false);
+    Serial.println("[WIFI] Scanning for available networks across all 2.4GHz channels...");
+    int16_t n = WiFi.scanNetworks(false, true, false, 250);
     if (n < 0) {
         Serial.printf("[WIFI_WARN] Scan failed with code %d. Resetting STA and retrying...\n", n);
         WiFi.disconnect(false, false);
         delay(200);
-        n = WiFi.scanNetworks(false, false);
+        n = WiFi.scanNetworks(false, true, false, 350);
     }
     Serial.printf("[WIFI] Scan finished, found %d networks\n", n);
 
