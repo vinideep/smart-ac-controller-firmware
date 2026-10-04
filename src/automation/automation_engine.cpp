@@ -242,17 +242,21 @@ void AutomationEngine::setNightCycle(bool enable, float targetTemp, int8_t overr
         _config.nightCycle.startMinute = curM;
         _config.nightCycle.stageStartTimeMs = millis();
         _config.nightCycle.preDawnTriggered = false;
+        _config.enabled = true; // Ensure automation loop evaluates night cycle
+
+        const DHTReading& initReading = _dht.getLatestReading();
+        bool alreadyCool = initReading.valid && (initReading.temperature_c <= _config.nightCycle.targetTemp);
 
         // Auto-adjust starting phase based on current time of the location
         if (curH >= 21 && curH < 23) {
-            // 9 PM - 10:59 PM (e.g. 10 PM): Stage 1 initial pulldown to 27C
-            _nightCycleStage = NightCycleStage::InitialPulldown;
+            // 9 PM - 10:59 PM (e.g. 10 PM): Stage 1 initial pulldown to 27C, or pause 1 if already cool
+            _nightCycleStage = alreadyCool ? NightCycleStage::Pause1_30m : NightCycleStage::InitialPulldown;
         } else if (curH == 23) {
-            // 11 PM: Room pulldown to 27C, then directly onto 40m pause and midnight
-            _nightCycleStage = NightCycleStage::InitialPulldown;
+            // 11 PM: Room pulldown to 27C, or pause 2 if already cool
+            _nightCycleStage = alreadyCool ? NightCycleStage::Pause2_40m : NightCycleStage::InitialPulldown;
         } else if (curH >= 0 && curH < 3) {
-            // Midnight - 2:59 AM: Mid-night cooling to 27C with extended rest
-            _nightCycleStage = NightCycleStage::Midnight_Cool27;
+            // Midnight - 2:59 AM: Mid-night cooling to 27C, or extended pause if already cool
+            _nightCycleStage = alreadyCool ? NightCycleStage::Midnight_PauseExtended : NightCycleStage::Midnight_Cool27;
         } else if (curH >= 3 && curH < 5) {
             // 3:00 AM - 4:59 AM: Pre-dawn 20-minute burst window
             _nightCycleStage = NightCycleStage::PreDawn_Burst20m;
@@ -261,7 +265,7 @@ void AutomationEngine::setNightCycle(bool enable, float targetTemp, int8_t overr
             // 5:00 AM - 7:59 AM: Morning rest / completion
             _nightCycleStage = NightCycleStage::PreDawn_Pause2h;
         } else {
-            _nightCycleStage = NightCycleStage::InitialPulldown;
+            _nightCycleStage = alreadyCool ? NightCycleStage::Pause1_30m : NightCycleStage::InitialPulldown;
         }
 
         const char* reason = nullptr;
@@ -281,6 +285,8 @@ void AutomationEngine::setNightCycle(bool enable, float targetTemp, int8_t overr
             if (_safety.canTurnOff(now, reason)) {
                 _ac.setPower(false, "night_cycle_pause_start");
                 _safety.recordPowerTransition(false, now);
+            } else if (!_safety.isAcPowered()) {
+                _ac.setPower(false, "night_cycle_pause_start_untracked");
             }
         }
         logEvent("night_cycle_started", "time_calibrated_start", _dht.getLatestReading().temperature_c);
@@ -512,6 +518,11 @@ void AutomationEngine::evaluateNightCycle(uint32_t now) {
                     _nightCycleStage = NightCycleStage::Pause1_30m;
                     _config.nightCycle.stageStartTimeMs = now;
                     logEvent("night_cycle_pause1", "target_27c_reached_turn_off_30m", currentTemp);
+                } else if (!_safety.isAcPowered()) {
+                    _ac.setPower(false, "night_cycle_target_27c_reached_untracked");
+                    _nightCycleStage = NightCycleStage::Pause1_30m;
+                    _config.nightCycle.stageStartTimeMs = now;
+                    logEvent("night_cycle_pause1", "target_27c_reached_turn_off_30m", currentTemp);
                 }
             } else if (!_safety.isAcPowered()) {
                 if (_safety.canTurnOn(now, reason)) {
@@ -549,6 +560,11 @@ void AutomationEngine::evaluateNightCycle(uint32_t now) {
                     _nightCycleStage = NightCycleStage::Pause2_40m;
                     _config.nightCycle.stageStartTimeMs = now;
                     logEvent("night_cycle_pause2", "cycle2_reached_turn_off_40m", currentTemp);
+                } else if (!_safety.isAcPowered()) {
+                    _ac.setPower(false, "night_cycle_cycle2_reached_untracked");
+                    _nightCycleStage = NightCycleStage::Pause2_40m;
+                    _config.nightCycle.stageStartTimeMs = now;
+                    logEvent("night_cycle_pause2", "cycle2_reached_turn_off_40m", currentTemp);
                 }
             } else if (!_safety.isAcPowered()) {
                 if (_safety.canTurnOn(now, reason)) {
@@ -581,9 +597,17 @@ void AutomationEngine::evaluateNightCycle(uint32_t now) {
             bool targetAchieved = reading.valid && (currentTemp <= _config.nightCycle.targetTemp);
             bool maxTimeout = (stageElapsedSec >= 1800);
             if (targetAchieved || maxTimeout) {
+                bool shouldTransition = false;
                 if (_safety.canTurnOff(now, reason)) {
                     _ac.setPower(false, "night_cycle_midnight_reached");
                     _safety.recordPowerTransition(false, now);
+                    shouldTransition = true;
+                } else if (!_safety.isAcPowered()) {
+                    _ac.setPower(false, "night_cycle_midnight_reached_untracked");
+                    shouldTransition = true;
+                }
+
+                if (shouldTransition) {
                     _nightCycleStage = NightCycleStage::Midnight_PauseExtended;
                     _config.nightCycle.stageStartTimeMs = now;
 
@@ -673,6 +697,15 @@ void AutomationEngine::update() {
         evaluateThermalBreach(reading.temperature_c, now, _safety.isAcPowered());
     }
 
+    // 2. Evaluate Night Sleep Cycle Automation
+    if (_config.nightCycle.enabled) {
+        if (now - _lastEvalTime >= _config.evalIntervalMs) {
+            _lastEvalTime = now;
+            evaluateNightCycle(now);
+        }
+        return;
+    }
+
     if (!_config.enabled) return;
 
     if (now - _lastEvalTime < _config.evalIntervalMs) {
@@ -690,14 +723,8 @@ void AutomationEngine::update() {
     bool isPresent = _presence.isPresent();
     uint32_t emptyDuration = isPresent ? 0 : _presence.getDurationSeconds();
     bool acOn = _safety.isAcPowered();
-    bool sleepActive = _config.sleepConfig.enabled || _config.nightCycle.enabled;
+    bool sleepActive = _config.sleepConfig.enabled;
     bool effectivePresence = !_config.presenceDetectionEnabled || isPresent || sleepActive;
-
-    // 2. Update Night Sleep Cycle Automation
-    if (_config.nightCycle.enabled) {
-        evaluateNightCycle(now);
-        return;
-    }
 
     // 3. Update Circadian Sleep Engine
     evaluateCircadianSleep(now);

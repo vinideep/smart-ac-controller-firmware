@@ -37,11 +37,7 @@ bool SafetyManager::canTurnOn(uint32_t nowMs, const char*& rejectReason) const {
 }
 
 bool SafetyManager::canTurnOff(uint32_t nowMs, const char*& rejectReason) const {
-    if (!_isAcPowered) {
-        rejectReason = "AC is already powered OFF";
-        return false;
-    }
-    if (_lastTurnOnMs > 0 && (nowMs - _lastTurnOnMs) < _minOnTimeMs) {
+    if (_lastTurnOnMs > 0 && _isAcPowered && (nowMs - _lastTurnOnMs) < _minOnTimeMs) {
         rejectReason = "Compressor protection: minimum ON run time has not elapsed";
         return false;
     }
