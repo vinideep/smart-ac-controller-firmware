@@ -30,6 +30,12 @@ void AutomationEngine::loadFromNVS() {
         _config.thermalBreachProtection = prefs.getBool("breach_en", _config.thermalBreachProtection);
         _config.presenceDetectionEnabled = prefs.getBool("pres_en", _config.presenceDetectionEnabled);
         _config.continuousInverterMode = prefs.getBool("inv_mode", _config.continuousInverterMode);
+        _config.nightCycle.enabled = prefs.getBool("night_en", _config.nightCycle.enabled);
+        _config.nightCycle.targetTemp = prefs.getFloat("night_tgt", _config.nightCycle.targetTemp);
+        if (_config.nightCycle.enabled) {
+            _nightCycleStage = NightCycleStage::InitialPulldown;
+            _config.nightCycle.stageStartTimeMs = millis();
+        }
         prefs.end();
     }
 #endif
@@ -52,6 +58,8 @@ void AutomationEngine::saveToNVS() {
         prefs.putBool("breach_en", _config.thermalBreachProtection);
         prefs.putBool("pres_en", _config.presenceDetectionEnabled);
         prefs.putBool("inv_mode", _config.continuousInverterMode);
+        prefs.putBool("night_en", _config.nightCycle.enabled);
+        prefs.putFloat("night_tgt", _config.nightCycle.targetTemp);
         prefs.end();
     }
 #endif
@@ -164,6 +172,65 @@ const char* AutomationEngine::getSleepStageStr() const {
     }
 }
 
+void AutomationEngine::setNightCycle(bool enable, float targetTemp) {
+    _config.nightCycle.enabled = enable;
+    if (targetTemp >= 18.0f && targetTemp <= 31.0f) {
+        _config.nightCycle.targetTemp = targetTemp;
+    }
+    if (enable) {
+        _nightCycleStage = NightCycleStage::InitialPulldown;
+        _config.nightCycle.stageStartTimeMs = millis();
+        const char* reason = nullptr;
+        uint32_t now = millis();
+        if (_safety.canTurnOn(now, reason)) {
+            uint8_t t = (uint8_t)round(_config.nightCycle.targetTemp);
+            _ac.setState(true, t, "cool", "auto", "night_cycle_start");
+            _safety.recordPowerTransition(true, now);
+            logEvent("night_cycle_started", "initial_pulldown_27c", _dht.getLatestReading().temperature_c);
+        }
+    } else {
+        _nightCycleStage = NightCycleStage::Inactive;
+        _config.targetTemperature = _config.baseTargetTemp;
+        logEvent("night_cycle_stopped", "manual_override", _dht.getLatestReading().temperature_c);
+    }
+    saveToNVS();
+}
+
+const char* AutomationEngine::getNightCycleStageStr() const {
+    switch (_nightCycleStage) {
+        case NightCycleStage::InitialPulldown:        return "initial_pulldown";
+        case NightCycleStage::Pause1_30m:             return "pause1_30m";
+        case NightCycleStage::Cycle2_Cool27:          return "cycle2_cool27";
+        case NightCycleStage::Pause2_40m:             return "pause2_40m";
+        case NightCycleStage::Midnight_Cool27:        return "midnight_cool27";
+        case NightCycleStage::Midnight_PauseExtended: return "midnight_pause_extended";
+        case NightCycleStage::PreDawn_Burst20m:       return "predawn_burst20m";
+        case NightCycleStage::PreDawn_Pause2h:        return "predawn_pause2h";
+        case NightCycleStage::Completed:              return "completed";
+        case NightCycleStage::Inactive:
+        default:                                      return "inactive";
+    }
+}
+
+uint32_t AutomationEngine::getNightCycleStageRemainingSec() const {
+    if (!_config.nightCycle.enabled) return 0;
+    uint32_t elapsedSec = (millis() - _config.nightCycle.stageStartTimeMs) / 1000;
+    switch (_nightCycleStage) {
+        case NightCycleStage::Pause1_30m:
+            return elapsedSec < _config.nightCycle.pause1DurationSec ? (_config.nightCycle.pause1DurationSec - elapsedSec) : 0;
+        case NightCycleStage::Pause2_40m:
+            return elapsedSec < _config.nightCycle.pause2DurationSec ? (_config.nightCycle.pause2DurationSec - elapsedSec) : 0;
+        case NightCycleStage::Midnight_PauseExtended:
+            return elapsedSec < _config.nightCycle.midnightPauseSec ? (_config.nightCycle.midnightPauseSec - elapsedSec) : 0;
+        case NightCycleStage::PreDawn_Burst20m:
+            return elapsedSec < _config.nightCycle.preDawnBurstSec ? (_config.nightCycle.preDawnBurstSec - elapsedSec) : 0;
+        case NightCycleStage::PreDawn_Pause2h:
+            return elapsedSec < _config.nightCycle.preDawnPauseSec ? (_config.nightCycle.preDawnPauseSec - elapsedSec) : 0;
+        default:
+            return 0;
+    }
+}
+
 const char* AutomationEngine::getPresenceTierStr() const {
     switch (_presenceTier) {
         case PresenceTier::EcoDrift: return "eco_drift";
@@ -270,17 +337,187 @@ void AutomationEngine::evaluateCircadianSleep(uint32_t now) {
         _config.targetTemperature = _config.sleepConfig.maxRampTemp;
     }
     // Stage 4: Wakeup (> 8 hrs)
-    else {
-        _sleepStage = SleepStage::Wakeup;
-        const char* reason = nullptr;
-        if (_safety.canTurnOff(now, reason)) {
-            _ac.setPower(false, "circadian_wakeup_complete");
-            _safety.recordPowerTransition(false, now);
-            _config.sleepConfig.enabled = false;
-            _sleepStage = SleepStage::Inactive;
-            _config.targetTemperature = _config.baseTargetTemp;
-            logEvent("circadian_sleep_ended", "full_night_schedule_completed", _dht.getLatestReading().temperature_c);
+        else {
+            _sleepStage = SleepStage::Wakeup;
+            const char* reason = nullptr;
+            if (_safety.canTurnOff(now, reason)) {
+                _ac.setPower(false, "circadian_wakeup_complete");
+                _safety.recordPowerTransition(false, now);
+                _config.sleepConfig.enabled = false;
+                _sleepStage = SleepStage::Inactive;
+                _config.targetTemperature = _config.baseTargetTemp;
+                logEvent("circadian_sleep_ended", "full_night_schedule_completed", _dht.getLatestReading().temperature_c);
+            }
         }
+}
+
+void AutomationEngine::evaluateNightCycle(uint32_t now) {
+    if (!_config.nightCycle.enabled) return;
+
+    const DHTReading& reading = _dht.getLatestReading();
+    float currentTemp = reading.valid ? reading.temperature_c : 27.0f;
+    uint32_t stageElapsedMs = now - _config.nightCycle.stageStartTimeMs;
+    uint32_t stageElapsedSec = stageElapsedMs / 1000;
+    const char* reason = nullptr;
+    uint8_t targetByte = (uint8_t)round(_config.nightCycle.targetTemp);
+
+    // Freeze protection safeguard: if room drops below 18C, turn off immediately
+    if (_safety.isAcPowered() && currentTemp < 18.0f) {
+        if (_safety.canTurnOff(now, reason)) {
+            _ac.setPower(false, "freeze_protection_cutoff");
+            _safety.recordPowerTransition(false, now);
+            logEvent("power_off", "night_cycle_freeze_cutoff", currentTemp);
+        }
+        return;
+    }
+
+    switch (_nightCycleStage) {
+        case NightCycleStage::InitialPulldown: {
+            // Stage 1: Turn on AC to bring room temperature to 27C initially (max 60m safety guard)
+            bool targetAchieved = reading.valid && (currentTemp <= _config.nightCycle.targetTemp);
+            bool maxTimeout = (stageElapsedSec >= 3600);
+            if (targetAchieved || maxTimeout) {
+                if (_safety.canTurnOff(now, reason)) {
+                    _ac.setPower(false, "night_cycle_target_27c_reached");
+                    _safety.recordPowerTransition(false, now);
+                    _nightCycleStage = NightCycleStage::Pause1_30m;
+                    _config.nightCycle.stageStartTimeMs = now;
+                    logEvent("night_cycle_pause1", "target_27c_reached_turn_off_30m", currentTemp);
+                }
+            } else if (!_safety.isAcPowered()) {
+                if (_safety.canTurnOn(now, reason)) {
+                    _ac.setState(true, targetByte, "cool", "auto", "night_cycle_pulldown");
+                    _safety.recordPowerTransition(true, now);
+                }
+            }
+            break;
+        }
+
+        case NightCycleStage::Pause1_30m: {
+            // Stage 2: Turn off AC for 30 minutes
+            bool timeElapsed = (stageElapsedSec >= _config.nightCycle.pause1DurationSec);
+            bool overheatEarly = reading.valid && (currentTemp >= _config.nightCycle.targetTemp + 2.5f) && (stageElapsedSec >= 600);
+            if (timeElapsed || overheatEarly) {
+                if (_safety.canTurnOn(now, reason)) {
+                    _ac.setState(true, targetByte, "cool", "auto", "night_cycle_cool2_start");
+                    _safety.recordPowerTransition(true, now);
+                    _nightCycleStage = NightCycleStage::Cycle2_Cool27;
+                    _config.nightCycle.stageStartTimeMs = now;
+                    logEvent("night_cycle_cool2", "pause1_30m_complete_bring_to_27c", currentTemp);
+                }
+            }
+            break;
+        }
+
+        case NightCycleStage::Cycle2_Cool27: {
+            // Stage 3: Bring temperature back to 27C (max 45m safety guard)
+            bool targetAchieved = reading.valid && (currentTemp <= _config.nightCycle.targetTemp);
+            bool maxTimeout = (stageElapsedSec >= 2700);
+            if (targetAchieved || maxTimeout) {
+                if (_safety.canTurnOff(now, reason)) {
+                    _ac.setPower(false, "night_cycle_cycle2_reached");
+                    _safety.recordPowerTransition(false, now);
+                    _nightCycleStage = NightCycleStage::Pause2_40m;
+                    _config.nightCycle.stageStartTimeMs = now;
+                    logEvent("night_cycle_pause2", "cycle2_reached_turn_off_40m", currentTemp);
+                }
+            } else if (!_safety.isAcPowered()) {
+                if (_safety.canTurnOn(now, reason)) {
+                    _ac.setState(true, targetByte, "cool", "auto", "night_cycle_cool2");
+                    _safety.recordPowerTransition(true, now);
+                }
+            }
+            break;
+        }
+
+        case NightCycleStage::Pause2_40m: {
+            // Stage 4: Turn off AC for 40 minutes
+            bool timeElapsed = (stageElapsedSec >= _config.nightCycle.pause2DurationSec);
+            bool overheatEarly = reading.valid && (currentTemp >= _config.nightCycle.targetTemp + 2.5f) && (stageElapsedSec >= 600);
+            if (timeElapsed || overheatEarly) {
+                if (_safety.canTurnOn(now, reason)) {
+                    _ac.setState(true, targetByte, "cool", "med", "night_cycle_midnight_start");
+                    _safety.recordPowerTransition(true, now);
+                    _nightCycleStage = NightCycleStage::Midnight_Cool27;
+                    _config.nightCycle.stageStartTimeMs = now;
+                    logEvent("night_cycle_midnight_cool", "pause2_40m_complete_midnight_cool", currentTemp);
+                }
+            }
+            break;
+        }
+
+        case NightCycleStage::Midnight_Cool27: {
+            // Stage 5: Mid-night maintenance cool to 27C with lower blower
+            bool targetAchieved = reading.valid && (currentTemp <= _config.nightCycle.targetTemp);
+            bool maxTimeout = (stageElapsedSec >= 1800);
+            if (targetAchieved || maxTimeout) {
+                if (_safety.canTurnOff(now, reason)) {
+                    _ac.setPower(false, "night_cycle_midnight_reached");
+                    _safety.recordPowerTransition(false, now);
+                    _nightCycleStage = NightCycleStage::Midnight_PauseExtended;
+                    _config.nightCycle.stageStartTimeMs = now;
+                    logEvent("night_cycle_midnight_pause", "midnight_reached_extended_pause_75m", currentTemp);
+                }
+            } else if (!_safety.isAcPowered()) {
+                if (_safety.canTurnOn(now, reason)) {
+                    _ac.setState(true, targetByte, "cool", "med", "night_cycle_midnight_cool");
+                    _safety.recordPowerTransition(true, now);
+                }
+            }
+            break;
+        }
+
+        case NightCycleStage::Midnight_PauseExtended: {
+            // Stage 6: Mid-night extended OFF (75 minutes)
+            bool timeElapsed = (stageElapsedSec >= _config.nightCycle.midnightPauseSec);
+            bool overheatEarly = reading.valid && (currentTemp >= _config.nightCycle.targetTemp + 2.5f) && (stageElapsedSec >= 1200);
+            if (timeElapsed || overheatEarly) {
+                if (_safety.canTurnOn(now, reason)) {
+                    _ac.setState(true, targetByte, "cool", "low", "night_cycle_predawn_start");
+                    _safety.recordPowerTransition(true, now);
+                    _nightCycleStage = NightCycleStage::PreDawn_Burst20m;
+                    _config.nightCycle.stageStartTimeMs = now;
+                    logEvent("night_cycle_predawn_burst", "midnight_pause_done_start_20m_burst", currentTemp);
+                }
+            }
+            break;
+        }
+
+        case NightCycleStage::PreDawn_Burst20m: {
+            // Stage 7: 3 AM - 5 AM window: Turn ON for 20 minutes
+            bool burstComplete = (stageElapsedSec >= _config.nightCycle.preDawnBurstSec);
+            if (burstComplete) {
+                if (_safety.canTurnOff(now, reason)) {
+                    _ac.setPower(false, "night_cycle_predawn_burst_done");
+                    _safety.recordPowerTransition(false, now);
+                    _nightCycleStage = NightCycleStage::PreDawn_Pause2h;
+                    _config.nightCycle.stageStartTimeMs = now;
+                    logEvent("night_cycle_predawn_pause", "20m_burst_done_turn_off_2h", currentTemp);
+                }
+            } else if (!_safety.isAcPowered()) {
+                if (_safety.canTurnOn(now, reason)) {
+                    _ac.setState(true, targetByte, "cool", "low", "night_cycle_predawn_burst");
+                    _safety.recordPowerTransition(true, now);
+                }
+            }
+            break;
+        }
+
+        case NightCycleStage::PreDawn_Pause2h: {
+            // Stage 8: Turn OFF for 2 hours (7200s)
+            bool pauseComplete = (stageElapsedSec >= _config.nightCycle.preDawnPauseSec);
+            if (pauseComplete) {
+                _nightCycleStage = NightCycleStage::Completed;
+                _config.nightCycle.enabled = false;
+                _nightCycleStage = NightCycleStage::Inactive;
+                _config.targetTemperature = _config.baseTargetTemp;
+                logEvent("night_cycle_completed", "full_night_cycle_finished", currentTemp);
+            }
+            break;
+        }
+
+        default:
+            break;
     }
 }
 
@@ -311,10 +548,16 @@ void AutomationEngine::update() {
     bool isPresent = _presence.isPresent();
     uint32_t emptyDuration = isPresent ? 0 : _presence.getDurationSeconds();
     bool acOn = _safety.isAcPowered();
-    bool sleepActive = _config.sleepConfig.enabled;
+    bool sleepActive = _config.sleepConfig.enabled || _config.nightCycle.enabled;
     bool effectivePresence = !_config.presenceDetectionEnabled || isPresent || sleepActive;
 
-    // 2. Update Circadian Sleep Engine
+    // 2. Update Night Sleep Cycle Automation
+    if (_config.nightCycle.enabled) {
+        evaluateNightCycle(now);
+        return;
+    }
+
+    // 3. Update Circadian Sleep Engine
     evaluateCircadianSleep(now);
 
     // 3. Multi-Tier Presence & Micro-Zoning
@@ -494,6 +737,11 @@ void AutomationEngine::toJSON(JsonDocument& doc) const {
     doc["presence_detection_enabled"] = _config.presenceDetectionEnabled;
     doc["comfort_index_optimization"] = _config.comfortIndexOptimization;
     doc["continuous_inverter_mode"] = _config.continuousInverterMode;
+    doc["night_cycle_enabled"] = _config.nightCycle.enabled;
+    doc["night_cycle_stage"] = (uint8_t)_nightCycleStage;
+    doc["night_cycle_stage_str"] = getNightCycleStageStr();
+    doc["night_cycle_target_temp"] = _config.nightCycle.targetTemp;
+    doc["night_cycle_stage_remaining_s"] = getNightCycleStageRemainingSec();
 }
 
 } // namespace ac::automation

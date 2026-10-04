@@ -7,6 +7,7 @@ LocalAPIServer::LocalAPIServer(control::ACController& ac,
                                sensors::PresenceSensorDriver& presence,
                                safety::SafetyManager& safety,
                                network::NetworkManager& network,
+                               automation::AutomationEngine& automation,
                                const String& deviceId)
     : _server(80),
       _ac(ac),
@@ -14,6 +15,7 @@ LocalAPIServer::LocalAPIServer(control::ACController& ac,
       _presence(presence),
       _safety(safety),
       _network(network),
+      _automation(automation),
       _deviceId(deviceId) {}
 
 void LocalAPIServer::begin(uint16_t port) {
@@ -80,6 +82,10 @@ void LocalAPIServer::setupRoutes() {
     _server.on("/api/wifi/scan", HTTP_GET, [this]() { handleWifiScan(); });
     _server.on("/api/wifi/configure", HTTP_POST, [this]() { handleWifiConfigure(); });
     _server.on("/api/wifi/status", HTTP_GET, [this]() { handleWifiStatus(); });
+
+    // Automation & Night Sleep Cycle Routes
+    _server.on("/api/automation/night-cycle", HTTP_GET, [this]() { handleNightCycle(); });
+    _server.on("/api/automation/night-cycle", HTTP_POST, [this]() { handleNightCycle(); });
 }
 
 void LocalAPIServer::handleRoot() {
@@ -364,6 +370,11 @@ void LocalAPIServer::handleStatus() {
     JsonObject acObj = doc["ac"].to<JsonObject>();
     state.serializeTo(acObj);
 
+    // Automation State & Night Cycle
+    JsonDocument autoDoc;
+    _automation.toJSON(autoDoc);
+    doc["automation"] = autoDoc;
+
     // System
     JsonObject sys = doc["system"].to<JsonObject>();
     sys["ip"] = _network.getIPAddress();
@@ -562,6 +573,37 @@ void LocalAPIServer::handleWifiStatus() {
     doc["mac"] = WiFi.macAddress();
     String out;
     serializeJson(doc, out);
+    _server.send(200, "application/json", out);
+}
+
+void LocalAPIServer::handleNightCycle() {
+    sendCORS();
+    if (_server.method() == HTTP_POST) {
+        if (_server.hasArg("plain")) {
+            JsonDocument doc;
+            DeserializationError err = deserializeJson(doc, _server.arg("plain"));
+            if (!err) {
+                bool enabled = doc["enabled"] | true;
+                float targetTemp = doc["target_temp"] | 27.0f;
+                _automation.setNightCycle(enabled, targetTemp);
+            }
+        } else {
+            _automation.setNightCycle(!_automation.isNightCycleEnabled(), 27.0f);
+        }
+    }
+
+    JsonDocument resp;
+    resp["enabled"] = _automation.isNightCycleEnabled();
+    resp["stage"] = (uint8_t)_automation.getNightCycleStage();
+    resp["stage_str"] = _automation.getNightCycleStageStr();
+    resp["target_temp"] = 27.0f;
+    resp["stage_remaining_s"] = _automation.getNightCycleStageRemainingSec();
+    resp["ac_power"] = _ac.getState().power;
+    const DHTReading& dht = _dht.getLatestReading();
+    resp["room_temp"] = dht.valid ? dht.temperature_c : 0.0f;
+
+    String out;
+    serializeJson(resp, out);
     _server.send(200, "application/json", out);
 }
 

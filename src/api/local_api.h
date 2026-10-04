@@ -8,6 +8,7 @@
 #include "../sensors/presence_sensor.h"
 #include "../safety/safety_manager.h"
 #include "../network/network_manager.h"
+#include "../automation/automation_engine.h"
 
 namespace ac::api {
 
@@ -18,6 +19,7 @@ public:
                    sensors::PresenceSensorDriver& presence,
                    safety::SafetyManager& safety,
                    network::NetworkManager& network,
+                   automation::AutomationEngine& automation,
                    const String& deviceId);
 
     void begin(uint16_t port = 80);
@@ -30,6 +32,7 @@ private:
     sensors::PresenceSensorDriver& _presence;
     safety::SafetyManager& _safety;
     network::NetworkManager& _network;
+    automation::AutomationEngine& _automation;
     const String& _deviceId;
 
     void setupRoutes();
@@ -46,6 +49,7 @@ private:
     void handleWifiScan();
     void handleWifiConfigure();
     void handleWifiStatus();
+    void handleNightCycle();
 };
 
 } // namespace ac::api

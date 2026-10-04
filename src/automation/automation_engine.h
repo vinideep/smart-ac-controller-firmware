@@ -24,12 +24,36 @@ enum class SleepStage {
     Wakeup
 };
 
+enum class NightCycleStage {
+    Inactive,
+    InitialPulldown,         // Phase 1: Cool to 27°C
+    Pause1_30m,              // Turn OFF for 30 minutes
+    Cycle2_Cool27,           // Phase 2: Cool to 27°C again
+    Pause2_40m,              // Turn OFF for 40 minutes
+    Midnight_Cool27,         // Phase 3: Midnight cool to 27°C
+    Midnight_PauseExtended,  // Mid-night extended OFF (75 mins)
+    PreDawn_Burst20m,        // Phase 4: 3am-5am window 20m burst ON
+    PreDawn_Pause2h,         // Turn OFF for 2 hours (120 mins)
+    Completed                // Night cycle complete
+};
+
 struct CircadianSleepConfig {
     bool enabled = false;
     uint8_t pulldownTemp = 23;
     float rampRatePerHr = 0.5f;
     float maxRampTemp = 25.5f;
     uint32_t sleepStartTimeMs = 0;
+};
+
+struct NightCycleConfig {
+    bool enabled = false;
+    float targetTemp = 27.0f;
+    uint32_t pause1DurationSec = 1800;   // 30 mins
+    uint32_t pause2DurationSec = 2400;   // 40 mins
+    uint32_t midnightPauseSec = 4500;    // 75 mins
+    uint32_t preDawnBurstSec = 1200;     // 20 mins
+    uint32_t preDawnPauseSec = 7200;     // 2 hours
+    uint32_t stageStartTimeMs = 0;
 };
 
 struct AutomationConfig {
@@ -52,6 +76,7 @@ struct AutomationConfig {
     bool continuousInverterMode = true;       // Keeps AC running and modulates setpoint instead of hard power cycling
 
     CircadianSleepConfig sleepConfig;
+    NightCycleConfig nightCycle;
 };
 
 struct ThermalSample {
@@ -122,6 +147,12 @@ public:
     SleepStage getSleepStage() const { return _sleepStage; }
     const char* getSleepStageStr() const;
 
+    void setNightCycle(bool enable, float targetTemp = 27.0f);
+    bool isNightCycleEnabled() const { return _config.nightCycle.enabled; }
+    NightCycleStage getNightCycleStage() const { return _nightCycleStage; }
+    const char* getNightCycleStageStr() const;
+    uint32_t getNightCycleStageRemainingSec() const;
+
     PresenceTier getPresenceTier() const { return _presenceTier; }
     const char* getPresenceTierStr() const;
 
@@ -138,6 +169,7 @@ private:
 
     PresenceTier _presenceTier = PresenceTier::Active;
     SleepStage _sleepStage = SleepStage::Inactive;
+    NightCycleStage _nightCycleStage = NightCycleStage::Inactive;
     bool _lastPresenceState = true;
     bool _turnedOffByVacancy = false;
     bool _thermalBreachActive = false;
@@ -153,6 +185,7 @@ private:
     void recordBreachSample(float temp, uint32_t now);
     void evaluateThermalBreach(float currentTemp, uint32_t now, bool acOn);
     void evaluateCircadianSleep(uint32_t now);
+    void evaluateNightCycle(uint32_t now);
     void logEvent(const char* action, const char* reason, float currentTemp);
 };
 

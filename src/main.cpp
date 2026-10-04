@@ -30,7 +30,7 @@ ac::automation::AutomationEngine automationEngine(acController, safetyManager, p
 String deviceId;
 
 ac::network::NetworkManager networkManager;
-ac::api::LocalAPIServer apiServer(acController, dhtDriver, presenceSensor, safetyManager, networkManager, deviceId);
+ac::api::LocalAPIServer apiServer(acController, dhtDriver, presenceSensor, safetyManager, networkManager, automationEngine, deviceId);
 ac::cloud::CloudClient cloudClient(BACKEND_URL, DEVICE_TOKEN);
 
 // Serial command buffer and TX blanking timestamp
@@ -176,6 +176,11 @@ void processCommand(const String& rawCmd) {
                 float ramp = doc["ramp"] | 0.5f;
                 float maxT = doc["max_temp"] | 25.5f;
                 automationEngine.setCircadianSleep(en, pdown, ramp, maxT);
+            } else if (strcmp(commandType, "night_cycle") == 0) {
+                bool en = doc["enabled"] | doc["value"] | false;
+                float tgt = doc["target_temp"] | doc["target"] | 27.0f;
+                automationEngine.setNightCycle(en, tgt);
+                Serial.printf("[CMD_OK] Night sleep cycle %s (Target: %.1fC)\n", en ? "ENABLED" : "DISABLED", tgt);
             } else if (strcmp(commandType, "eco_drift") == 0) {
                 bool en = doc["value"] | false;
                 automationEngine.setEcoDriftEnabled(en);
@@ -198,6 +203,10 @@ void processCommand(const String& rawCmd) {
                 if (!doc["presence_detection_enabled"].isNull()) automationEngine.setPresenceDetectionEnabled(doc["presence_detection_enabled"].as<bool>());
                 if (!doc["sleep_enabled"].isNull()) {
                     automationEngine.setCircadianSleep(doc["sleep_enabled"].as<bool>(), doc["pulldown_temp"] | 23, doc["ramp_rate"] | 0.5f, doc["max_temp"] | 25.5f);
+                }
+                if (!doc["night_cycle_enabled"].isNull()) {
+                    float tgt = doc["night_cycle_target"] | doc["target_temp"] | 27.0f;
+                    automationEngine.setNightCycle(doc["night_cycle_enabled"].as<bool>(), tgt);
                 }
                 Serial.println("[CMD_OK] Automation engine configuration updated");
             } else if (strcmp(commandType, "state") == 0) {
@@ -602,6 +611,27 @@ void processCommand(const String& rawCmd) {
         } else {
             Serial.println("[CMD_ERR] Usage: SET_COMFORT <1|0>");
         }
+    } else if (upper.startsWith("SET_NIGHT_CYCLE")) {
+        int spaceIdx = upper.indexOf(' ');
+        if (spaceIdx > 0) {
+            String rest = upper.substring(spaceIdx + 1);
+            rest.trim();
+            int secondSpace = rest.indexOf(' ');
+            bool en = false;
+            float tgt = 27.0f;
+            if (secondSpace > 0) {
+                String enStr = rest.substring(0, secondSpace);
+                en = (enStr == "1" || enStr == "ON" || enStr == "TRUE");
+                tgt = rest.substring(secondSpace + 1).toFloat();
+                if (tgt < 18.0f || tgt > 31.0f) tgt = 27.0f;
+            } else {
+                en = (rest == "1" || rest == "ON" || rest == "TRUE");
+            }
+            automationEngine.setNightCycle(en, tgt);
+            Serial.printf("[CMD_OK] Night sleep cycle %s (Target: %.1fC)\n", en ? "ENABLED" : "DISABLED", tgt);
+        } else {
+            Serial.println("[CMD_ERR] Usage: SET_NIGHT_CYCLE <1|0> [target_temp]");
+        }
     } else if (upper == "TEST_TX") {
         digitalWrite(STATUS_LED_PIN, HIGH);
         lastTxBlankingTime = millis();
@@ -829,6 +859,11 @@ void loop() {
         cloudDoc["wifi_ssid"] = networkManager.getSSID();
         cloudDoc["wifi_rssi"] = networkManager.getRSSI();
         cloudDoc["is_ap"] = networkManager.isAPMode();
+        cloudDoc["night_cycle_enabled"] = automationEngine.isNightCycleEnabled();
+        cloudDoc["night_cycle_stage"] = automationEngine.getNightCycleStageStr();
+        cloudDoc["night_cycle_stage_id"] = (uint8_t)automationEngine.getNightCycleStage();
+        cloudDoc["night_cycle_target_temp"] = 27.0f;
+        cloudDoc["night_cycle_remaining_s"] = automationEngine.getNightCycleStageRemainingSec();
         cloudDoc["timestamp_ms"] = millis();
 
         cloudClient.update(cloudDoc);
