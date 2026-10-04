@@ -1,5 +1,7 @@
 #include "automation_engine.h"
 #include <math.h>
+#include <time.h>
+#include <sys/time.h>
 
 #if defined(ARDUINO_ARCH_ESP32) || defined(ESP32)
 #include <Preferences.h>
@@ -12,6 +14,53 @@ AutomationEngine::AutomationEngine(control::ACController& ac,
                                    sensors::PresenceSensorDriver& presence,
                                    DHTDriver& dht)
     : _ac(ac), _safety(safety), _presence(presence), _dht(dht) {}
+
+void AutomationEngine::syncTime(uint32_t epochSec, int16_t tzOffsetMin) {
+    if (epochSec > 1700000000) {
+        timeval tv = { .tv_sec = (time_t)epochSec, .tv_usec = 0 };
+        settimeofday(&tv, nullptr);
+        char tzBuf[32];
+        int hrs = tzOffsetMin / 60;
+        int mins = abs(tzOffsetMin % 60);
+        snprintf(tzBuf, sizeof(tzBuf), "UTC%+d:%02d", -hrs, mins);
+        setenv("TZ", tzBuf, 1);
+        tzset();
+        Serial.printf("[TIME] Synced epoch %u with TZ offset %d mins\n", epochSec, tzOffsetMin);
+    }
+}
+
+bool AutomationEngine::hasValidTime() const {
+    time_t nowSec = time(nullptr);
+    return (nowSec > 1700000000);
+}
+
+bool AutomationEngine::getLocalTime(uint8_t& outHour, uint8_t& outMinute, uint8_t& outSecond) const {
+    time_t nowSec = time(nullptr);
+    if (nowSec > 1700000000) {
+        struct tm ti;
+        localtime_r(&nowSec, &ti);
+        outHour = ti.tm_hour;
+        outMinute = ti.tm_min;
+        outSecond = ti.tm_sec;
+        return true;
+    }
+    outHour = 22; // Default to 10 PM
+    outMinute = 0;
+    outSecond = 0;
+    return false;
+}
+
+uint8_t AutomationEngine::getLocalHour() const {
+    uint8_t h, m, s;
+    getLocalTime(h, m, s);
+    return h;
+}
+
+uint8_t AutomationEngine::getLocalMinute() const {
+    uint8_t h, m, s;
+    getLocalTime(h, m, s);
+    return m;
+}
 
 void AutomationEngine::loadFromNVS() {
 #if defined(ARDUINO_ARCH_ESP32) || defined(ESP32)
@@ -172,22 +221,69 @@ const char* AutomationEngine::getSleepStageStr() const {
     }
 }
 
-void AutomationEngine::setNightCycle(bool enable, float targetTemp) {
+void AutomationEngine::setNightCycle(bool enable, float targetTemp, int8_t overrideHour, int8_t overrideMin) {
     _config.nightCycle.enabled = enable;
     if (targetTemp >= 18.0f && targetTemp <= 31.0f) {
         _config.nightCycle.targetTemp = targetTemp;
     }
     if (enable) {
-        _nightCycleStage = NightCycleStage::InitialPulldown;
+        uint8_t curH = 0, curM = 0, curS = 0;
+        bool hasTime = getLocalTime(curH, curM, curS);
+        if (overrideHour >= 0 && overrideHour < 24) {
+            curH = overrideHour;
+            curM = (overrideMin >= 0 && overrideMin < 60) ? overrideMin : 0;
+            hasTime = true;
+        } else if (!hasTime) {
+            curH = 22; // Default to 10 PM
+            curM = 0;
+        }
+
+        _config.nightCycle.startHour = curH;
+        _config.nightCycle.startMinute = curM;
         _config.nightCycle.stageStartTimeMs = millis();
+        _config.nightCycle.preDawnTriggered = false;
+
+        // Auto-adjust starting phase based on current time of the location
+        if (curH >= 21 && curH < 23) {
+            // 9 PM - 10:59 PM (e.g. 10 PM): Stage 1 initial pulldown to 27C
+            _nightCycleStage = NightCycleStage::InitialPulldown;
+        } else if (curH == 23) {
+            // 11 PM: Room pulldown to 27C, then directly onto 40m pause and midnight
+            _nightCycleStage = NightCycleStage::InitialPulldown;
+        } else if (curH >= 0 && curH < 3) {
+            // Midnight - 2:59 AM: Mid-night cooling to 27C with extended rest
+            _nightCycleStage = NightCycleStage::Midnight_Cool27;
+        } else if (curH >= 3 && curH < 5) {
+            // 3:00 AM - 4:59 AM: Pre-dawn 20-minute burst window
+            _nightCycleStage = NightCycleStage::PreDawn_Burst20m;
+            _config.nightCycle.preDawnTriggered = true;
+        } else if (curH >= 5 && curH < 8) {
+            // 5:00 AM - 7:59 AM: Morning rest / completion
+            _nightCycleStage = NightCycleStage::PreDawn_Pause2h;
+        } else {
+            _nightCycleStage = NightCycleStage::InitialPulldown;
+        }
+
         const char* reason = nullptr;
         uint32_t now = millis();
-        if (_safety.canTurnOn(now, reason)) {
-            uint8_t t = (uint8_t)round(_config.nightCycle.targetTemp);
-            _ac.setState(true, t, "cool", "auto", "night_cycle_start");
-            _safety.recordPowerTransition(true, now);
-            logEvent("night_cycle_started", "initial_pulldown_27c", _dht.getLatestReading().temperature_c);
+        if (_nightCycleStage == NightCycleStage::InitialPulldown || 
+            _nightCycleStage == NightCycleStage::Cycle2_Cool27 || 
+            _nightCycleStage == NightCycleStage::Midnight_Cool27 || 
+            _nightCycleStage == NightCycleStage::PreDawn_Burst20m) {
+            if (_safety.canTurnOn(now, reason)) {
+                uint8_t t = (uint8_t)round(_config.nightCycle.targetTemp);
+                const char* fan = (_nightCycleStage == NightCycleStage::PreDawn_Burst20m || 
+                                   _nightCycleStage == NightCycleStage::Midnight_Cool27) ? "low" : "auto";
+                _ac.setState(true, t, "cool", fan, "night_cycle_start");
+                _safety.recordPowerTransition(true, now);
+            }
+        } else {
+            if (_safety.canTurnOff(now, reason)) {
+                _ac.setPower(false, "night_cycle_pause_start");
+                _safety.recordPowerTransition(false, now);
+            }
         }
+        logEvent("night_cycle_started", "time_calibrated_start", _dht.getLatestReading().temperature_c);
     } else {
         _nightCycleStage = NightCycleStage::Inactive;
         _config.targetTemperature = _config.baseTargetTemp;
@@ -215,13 +311,26 @@ const char* AutomationEngine::getNightCycleStageStr() const {
 uint32_t AutomationEngine::getNightCycleStageRemainingSec() const {
     if (!_config.nightCycle.enabled) return 0;
     uint32_t elapsedSec = (millis() - _config.nightCycle.stageStartTimeMs) / 1000;
+    uint8_t curH = 0, curM = 0, curS = 0;
+    bool hasClock = getLocalTime(curH, curM, curS);
+
     switch (_nightCycleStage) {
+        case NightCycleStage::InitialPulldown:
+            return elapsedSec < 3600 ? (3600 - elapsedSec) : 0;
         case NightCycleStage::Pause1_30m:
             return elapsedSec < _config.nightCycle.pause1DurationSec ? (_config.nightCycle.pause1DurationSec - elapsedSec) : 0;
+        case NightCycleStage::Cycle2_Cool27:
+            return elapsedSec < 2700 ? (2700 - elapsedSec) : 0;
         case NightCycleStage::Pause2_40m:
             return elapsedSec < _config.nightCycle.pause2DurationSec ? (_config.nightCycle.pause2DurationSec - elapsedSec) : 0;
-        case NightCycleStage::Midnight_PauseExtended:
+        case NightCycleStage::Midnight_Cool27:
+            return elapsedSec < 1800 ? (1800 - elapsedSec) : 0;
+        case NightCycleStage::Midnight_PauseExtended: {
+            if (hasClock && curH < 3) {
+                return (uint32_t)((2 - curH) * 3600 + (59 - curM) * 60 + (60 - curS));
+            }
             return elapsedSec < _config.nightCycle.midnightPauseSec ? (_config.nightCycle.midnightPauseSec - elapsedSec) : 0;
+        }
         case NightCycleStage::PreDawn_Burst20m:
             return elapsedSec < _config.nightCycle.preDawnBurstSec ? (_config.nightCycle.preDawnBurstSec - elapsedSec) : 0;
         case NightCycleStage::PreDawn_Pause2h:
@@ -361,6 +470,9 @@ void AutomationEngine::evaluateNightCycle(uint32_t now) {
     const char* reason = nullptr;
     uint8_t targetByte = (uint8_t)round(_config.nightCycle.targetTemp);
 
+    uint8_t curH = 0, curM = 0, curS = 0;
+    bool hasClock = getLocalTime(curH, curM, curS);
+
     // Freeze protection safeguard: if room drops below 18C, turn off immediately
     if (_safety.isAcPowered() && currentTemp < 18.0f) {
         if (_safety.canTurnOff(now, reason)) {
@@ -369,6 +481,23 @@ void AutomationEngine::evaluateNightCycle(uint32_t now) {
             logEvent("power_off", "night_cycle_freeze_cutoff", currentTemp);
         }
         return;
+    }
+
+    // Location Clock Auto-Adjustment: Trigger 3 AM - 5 AM window burst if not yet run
+    if (hasClock && curH >= 3 && curH < 5 && !_config.nightCycle.preDawnTriggered) {
+        if (_nightCycleStage != NightCycleStage::PreDawn_Burst20m && 
+            _nightCycleStage != NightCycleStage::PreDawn_Pause2h &&
+            _nightCycleStage != NightCycleStage::Completed) {
+            if (_safety.canTurnOn(now, reason)) {
+                _ac.setState(true, targetByte, "cool", "low", "night_cycle_predawn_burst_clock");
+                _safety.recordPowerTransition(true, now);
+                _nightCycleStage = NightCycleStage::PreDawn_Burst20m;
+                _config.nightCycle.stageStartTimeMs = now;
+                _config.nightCycle.preDawnTriggered = true;
+                logEvent("night_cycle_predawn_burst", "wall_clock_3am_window_burst", currentTemp);
+                return;
+            }
+        }
     }
 
     switch (_nightCycleStage) {
@@ -431,23 +560,24 @@ void AutomationEngine::evaluateNightCycle(uint32_t now) {
         }
 
         case NightCycleStage::Pause2_40m: {
-            // Stage 4: Turn off AC for 40 minutes
+            // Stage 4: Turn off AC for 40 minutes (auto-advances to midnight if clock is >= 00:00)
             bool timeElapsed = (stageElapsedSec >= _config.nightCycle.pause2DurationSec);
             bool overheatEarly = reading.valid && (currentTemp >= _config.nightCycle.targetTemp + 2.5f) && (stageElapsedSec >= 600);
-            if (timeElapsed || overheatEarly) {
+            bool midnightClockReached = hasClock && (curH >= 0 && curH < 3 && stageElapsedSec >= 900);
+            if (timeElapsed || overheatEarly || midnightClockReached) {
                 if (_safety.canTurnOn(now, reason)) {
-                    _ac.setState(true, targetByte, "cool", "med", "night_cycle_midnight_start");
+                    _ac.setState(true, targetByte, "cool", "low", "night_cycle_midnight_start");
                     _safety.recordPowerTransition(true, now);
                     _nightCycleStage = NightCycleStage::Midnight_Cool27;
                     _config.nightCycle.stageStartTimeMs = now;
-                    logEvent("night_cycle_midnight_cool", "pause2_40m_complete_midnight_cool", currentTemp);
+                    logEvent("night_cycle_midnight_cool", "pause2_complete_start_midnight", currentTemp);
                 }
             }
             break;
         }
 
         case NightCycleStage::Midnight_Cool27: {
-            // Stage 5: Mid-night maintenance cool to 27C with lower blower
+            // Stage 5: Mid-night maintenance cool to 27C with low blower
             bool targetAchieved = reading.valid && (currentTemp <= _config.nightCycle.targetTemp);
             bool maxTimeout = (stageElapsedSec >= 1800);
             if (targetAchieved || maxTimeout) {
@@ -456,11 +586,20 @@ void AutomationEngine::evaluateNightCycle(uint32_t now) {
                     _safety.recordPowerTransition(false, now);
                     _nightCycleStage = NightCycleStage::Midnight_PauseExtended;
                     _config.nightCycle.stageStartTimeMs = now;
-                    logEvent("night_cycle_midnight_pause", "midnight_reached_extended_pause_75m", currentTemp);
+
+                    // Calibrate pause so it lands at 03:00 AM based on local clock
+                    if (hasClock && curH < 3) {
+                        uint32_t secUntil3am = (uint32_t)((2 - curH) * 3600 + (59 - curM) * 60 + (60 - curS));
+                        _config.nightCycle.midnightPauseSec = max((uint32_t)2700, secUntil3am);
+                    } else {
+                        _config.nightCycle.midnightPauseSec = 4500;
+                    }
+
+                    logEvent("night_cycle_midnight_pause", "midnight_reached_extended_pause", currentTemp);
                 }
             } else if (!_safety.isAcPowered()) {
                 if (_safety.canTurnOn(now, reason)) {
-                    _ac.setState(true, targetByte, "cool", "med", "night_cycle_midnight_cool");
+                    _ac.setState(true, targetByte, "cool", "low", "night_cycle_midnight_cool");
                     _safety.recordPowerTransition(true, now);
                 }
             }
@@ -468,15 +607,17 @@ void AutomationEngine::evaluateNightCycle(uint32_t now) {
         }
 
         case NightCycleStage::Midnight_PauseExtended: {
-            // Stage 6: Mid-night extended OFF (75 minutes)
+            // Stage 6: Mid-night extended OFF period (reduced cooling demand)
             bool timeElapsed = (stageElapsedSec >= _config.nightCycle.midnightPauseSec);
-            bool overheatEarly = reading.valid && (currentTemp >= _config.nightCycle.targetTemp + 2.5f) && (stageElapsedSec >= 1200);
-            if (timeElapsed || overheatEarly) {
+            bool clockHit3am = hasClock && (curH >= 3);
+            bool overheatEarly = reading.valid && (currentTemp >= _config.nightCycle.targetTemp + 2.5f) && (stageElapsedSec >= 1800);
+            if (timeElapsed || clockHit3am || overheatEarly) {
                 if (_safety.canTurnOn(now, reason)) {
                     _ac.setState(true, targetByte, "cool", "low", "night_cycle_predawn_start");
                     _safety.recordPowerTransition(true, now);
                     _nightCycleStage = NightCycleStage::PreDawn_Burst20m;
                     _config.nightCycle.stageStartTimeMs = now;
+                    _config.nightCycle.preDawnTriggered = true;
                     logEvent("night_cycle_predawn_burst", "midnight_pause_done_start_20m_burst", currentTemp);
                 }
             }
@@ -484,7 +625,7 @@ void AutomationEngine::evaluateNightCycle(uint32_t now) {
         }
 
         case NightCycleStage::PreDawn_Burst20m: {
-            // Stage 7: 3 AM - 5 AM window: Turn ON for 20 minutes
+            // Stage 7: 3 AM - 5 AM window: Turn ON for 20 minutes (1200s)
             bool burstComplete = (stageElapsedSec >= _config.nightCycle.preDawnBurstSec);
             if (burstComplete) {
                 if (_safety.canTurnOff(now, reason)) {
@@ -504,9 +645,10 @@ void AutomationEngine::evaluateNightCycle(uint32_t now) {
         }
 
         case NightCycleStage::PreDawn_Pause2h: {
-            // Stage 8: Turn OFF for 2 hours (7200s)
+            // Stage 8: Turn OFF for 2 hours (7200s) or until morning wakeup (>= 06:00 AM)
             bool pauseComplete = (stageElapsedSec >= _config.nightCycle.preDawnPauseSec);
-            if (pauseComplete) {
+            bool morningWakeup = hasClock && (curH >= 6 && curH < 20);
+            if (pauseComplete || morningWakeup) {
                 _nightCycleStage = NightCycleStage::Completed;
                 _config.nightCycle.enabled = false;
                 _nightCycleStage = NightCycleStage::Inactive;
@@ -742,6 +884,17 @@ void AutomationEngine::toJSON(JsonDocument& doc) const {
     doc["night_cycle_stage_str"] = getNightCycleStageStr();
     doc["night_cycle_target_temp"] = _config.nightCycle.targetTemp;
     doc["night_cycle_stage_remaining_s"] = getNightCycleStageRemainingSec();
+    doc["night_cycle_start_hour"] = _config.nightCycle.startHour;
+    doc["night_cycle_start_min"] = _config.nightCycle.startMinute;
+
+    uint8_t curH = 0, curM = 0, curS = 0;
+    bool validClock = getLocalTime(curH, curM, curS);
+    doc["clock_synced"] = validClock;
+    char timeStr[16];
+    snprintf(timeStr, sizeof(timeStr), "%02u:%02u:%02u", curH, curM, curS);
+    doc["local_time_str"] = timeStr;
+    doc["local_hour"] = curH;
+    doc["local_minute"] = curM;
 }
 
 } // namespace ac::automation

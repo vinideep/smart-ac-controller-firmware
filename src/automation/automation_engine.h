@@ -50,10 +50,13 @@ struct NightCycleConfig {
     float targetTemp = 27.0f;
     uint32_t pause1DurationSec = 1800;   // 30 mins
     uint32_t pause2DurationSec = 2400;   // 40 mins
-    uint32_t midnightPauseSec = 4500;    // 75 mins
+    uint32_t midnightPauseSec = 4500;    // 75 mins (adjusted by location clock)
     uint32_t preDawnBurstSec = 1200;     // 20 mins
     uint32_t preDawnPauseSec = 7200;     // 2 hours
     uint32_t stageStartTimeMs = 0;
+    uint8_t startHour = 22;              // Hour when activated (defaults to 10 PM)
+    uint8_t startMinute = 0;
+    bool preDawnTriggered = false;
 };
 
 struct AutomationConfig {
@@ -147,7 +150,13 @@ public:
     SleepStage getSleepStage() const { return _sleepStage; }
     const char* getSleepStageStr() const;
 
-    void setNightCycle(bool enable, float targetTemp = 27.0f);
+    void syncTime(uint32_t epochSec, int16_t tzOffsetMin = 330);
+    bool getLocalTime(uint8_t& outHour, uint8_t& outMinute, uint8_t& outSecond) const;
+    uint8_t getLocalHour() const;
+    uint8_t getLocalMinute() const;
+    bool hasValidTime() const;
+
+    void setNightCycle(bool enable, float targetTemp = 27.0f, int8_t overrideHour = -1, int8_t overrideMin = -1);
     bool isNightCycleEnabled() const { return _config.nightCycle.enabled; }
     NightCycleStage getNightCycleStage() const { return _nightCycleStage; }
     const char* getNightCycleStageStr() const;

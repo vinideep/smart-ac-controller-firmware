@@ -585,7 +585,16 @@ void LocalAPIServer::handleNightCycle() {
             if (!err) {
                 bool enabled = doc["enabled"] | true;
                 float targetTemp = doc["target_temp"] | 27.0f;
-                _automation.setNightCycle(enabled, targetTemp);
+                int8_t h = doc["hour"] | -1;
+                int8_t m = doc["min"] | -1;
+                if (doc["epoch"].is<uint32_t>()) {
+                    uint32_t ep = doc["epoch"].as<uint32_t>();
+                    if (ep > 1700000000) {
+                        timeval tv = { .tv_sec = (time_t)ep, .tv_usec = 0 };
+                        settimeofday(&tv, nullptr);
+                    }
+                }
+                _automation.setNightCycle(enabled, targetTemp, h, m);
             }
         } else {
             _automation.setNightCycle(!_automation.isNightCycleEnabled(), 27.0f);
@@ -601,6 +610,13 @@ void LocalAPIServer::handleNightCycle() {
     resp["ac_power"] = _ac.getState().power;
     const DHTReading& dht = _dht.getLatestReading();
     resp["room_temp"] = dht.valid ? dht.temperature_c : 0.0f;
+
+    uint8_t curH = 0, curM = 0, curS = 0;
+    bool hasClock = _automation.getLocalTime(curH, curM, curS);
+    resp["clock_synced"] = hasClock;
+    char timeBuf[16];
+    snprintf(timeBuf, sizeof(timeBuf), "%02u:%02u:%02u", curH, curM, curS);
+    resp["local_time"] = timeBuf;
 
     String out;
     serializeJson(resp, out);

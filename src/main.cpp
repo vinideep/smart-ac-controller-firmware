@@ -179,8 +179,18 @@ void processCommand(const String& rawCmd) {
             } else if (strcmp(commandType, "night_cycle") == 0) {
                 bool en = doc["enabled"] | doc["value"] | false;
                 float tgt = doc["target_temp"] | doc["target"] | 27.0f;
-                automationEngine.setNightCycle(en, tgt);
-                Serial.printf("[CMD_OK] Night sleep cycle %s (Target: %.1fC)\n", en ? "ENABLED" : "DISABLED", tgt);
+                int8_t h = doc["hour"] | -1;
+                int8_t m = doc["min"] | -1;
+                if (doc["epoch"].is<uint32_t>()) {
+                    uint32_t ep = doc["epoch"].as<uint32_t>();
+                    if (ep > 1700000000) {
+                        timeval tv = { .tv_sec = (time_t)ep, .tv_usec = 0 };
+                        settimeofday(&tv, nullptr);
+                    }
+                }
+                automationEngine.setNightCycle(en, tgt, h, m);
+                Serial.printf("[CMD_OK] Night sleep cycle %s (Target: %.1fC, Location time: %02u:%02u)\n",
+                              en ? "ENABLED" : "DISABLED", tgt, automationEngine.getLocalHour(), automationEngine.getLocalMinute());
             } else if (strcmp(commandType, "eco_drift") == 0) {
                 bool en = doc["value"] | false;
                 automationEngine.setEcoDriftEnabled(en);

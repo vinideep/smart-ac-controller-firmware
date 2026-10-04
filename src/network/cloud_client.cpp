@@ -4,6 +4,7 @@
 #include <WiFiClientSecure.h>
 #include <WiFi.h>
 #include <esp_task_wdt.h>
+#include <sys/time.h>
 
 namespace ac {
 namespace cloud {
@@ -79,6 +80,13 @@ bool CloudClient::pushTelemetry(const JsonDocument& doc) {
         String payload = http.getString();
         JsonDocument resp;
         if (deserializeJson(resp, payload) == DeserializationError::Ok) {
+            if (resp["epoch"].is<uint32_t>()) {
+                uint32_t ep = resp["epoch"].as<uint32_t>();
+                if (ep > 1700000000) {
+                    timeval tv = { .tv_sec = (time_t)ep, .tv_usec = 0 };
+                    settimeofday(&tv, nullptr);
+                }
+            }
             JsonArray cmds = resp["commands"].as<JsonArray>();
             int count = 0;
             for (JsonVariant v : cmds) {

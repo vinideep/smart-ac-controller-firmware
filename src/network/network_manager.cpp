@@ -134,6 +134,10 @@ void NetworkManager::update() {
             _connecting = false;
             Serial.printf("[WIFI] Connected! IP Address: %s (RSSI: %d dBm)\n", 
                           WiFi.localIP().toString().c_str(), WiFi.RSSI());
+            configTime(19800, 0, "pool.ntp.org", "time.google.com");
+            setenv("TZ", "UTC-5:30", 1);
+            tzset();
+            Serial.println("[SNTP] Time synchronization started (UTC+5:30 IST)");
             if (MDNS.begin(_hostname.c_str())) {
                 MDNS.addService("http", "tcp", 80);
                 Serial.printf("[MDNS] Responder started: http://%s.local\n", _hostname.c_str());
