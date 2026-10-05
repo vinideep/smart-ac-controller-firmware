@@ -1,4 +1,6 @@
 #include "local_api.h"
+#include <Update.h>
+#include <esp_task_wdt.h>
 
 namespace ac::api {
 
@@ -86,6 +88,39 @@ void LocalAPIServer::setupRoutes() {
     // Automation & Night Sleep Cycle Routes
     _server.on("/api/automation/night-cycle", HTTP_GET, [this]() { handleNightCycle(); });
     _server.on("/api/automation/night-cycle", HTTP_POST, [this]() { handleNightCycle(); });
+
+    // Direct LAN OTA Firmware Upload
+    _server.on("/api/ota", HTTP_POST, [this]() {
+        sendCORS();
+        _server.sendHeader("Connection", "close");
+        if (Update.hasError()) {
+            _server.send(500, "application/json", "{\"success\":false,\"error\":\"OTA flashing failed\"}");
+        } else {
+            _server.send(200, "application/json", "{\"success\":true,\"message\":\"Firmware flashed successfully. Rebooting...\"}");
+            delay(800);
+            ESP.restart();
+        }
+    }, [this]() {
+        HTTPUpload& upload = _server.upload();
+        if (upload.status == UPLOAD_FILE_START) {
+            Serial.printf("[LOCAL_OTA] Beginning binary stream upload: %s\n", upload.filename.c_str());
+            esp_task_wdt_reset();
+            if (!Update.begin(UPDATE_SIZE_UNKNOWN)) {
+                Update.printError(Serial);
+            }
+        } else if (upload.status == UPLOAD_FILE_WRITE) {
+            esp_task_wdt_reset();
+            if (Update.write(upload.buf, upload.currentSize) != upload.currentSize) {
+                Update.printError(Serial);
+            }
+        } else if (upload.status == UPLOAD_FILE_END) {
+            if (Update.end(true)) {
+                Serial.printf("[LOCAL_OTA] Complete! %u bytes successfully written to flash.\n", upload.totalSize);
+            } else {
+                Update.printError(Serial);
+            }
+        }
+    });
 }
 
 void LocalAPIServer::handleRoot() {

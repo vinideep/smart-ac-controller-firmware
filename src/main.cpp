@@ -815,6 +815,8 @@ void loop() {
         JsonDocument cloudDoc;
         const DHTReading& dhtReading = dhtDriver.getLatestReading();
         cloudDoc["device_id"] = deviceId;
+        cloudDoc["firmware_version"] = FIRMWARE_VERSION;
+        cloudDoc["build"] = __DATE__;
         cloudDoc["temperature_c"] = dhtReading.temperature_c;
         cloudDoc["humidity_percent"] = dhtReading.humidity_percent;
         cloudDoc["heat_index_c"] = dhtReading.heat_index_c;

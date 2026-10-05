@@ -7,7 +7,7 @@
  */
 
 #ifndef FIRMWARE_VERSION
-#define FIRMWARE_VERSION "0.1.0-alpha"
+#define FIRMWARE_VERSION "v1.3.1"
 #endif
 
 #ifndef DEVICE_MODEL

@@ -6,8 +6,10 @@
 
 #include <Arduino.h>
 #include <WiFi.h>
+#include <WiFiClientSecure.h>
 #include <HTTPClient.h>
 #include <Update.h>
+#include <esp_task_wdt.h>
 
 namespace ac::ota {
 
@@ -21,7 +23,20 @@ public:
 
         Serial.printf("[OTA] Connecting to binary stream at: %s\n", url.c_str());
         HTTPClient http;
-        http.begin(url);
+        WiFiClientSecure secureClient;
+
+        if (url.startsWith("https://")) {
+            secureClient.setInsecure();
+            secureClient.setHandshakeTimeout(15);
+            http.begin(secureClient, url);
+        } else {
+            http.begin(url);
+        }
+
+        http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
+        http.setTimeout(25000);
+        esp_task_wdt_reset();
+
         int httpCode = http.GET();
         if (httpCode != HTTP_CODE_OK) {
             Serial.printf("[OTA] HTTP GET failed, error code: %d\n", httpCode);
@@ -42,18 +57,32 @@ public:
 
         bool canBegin = Update.begin(contentLength);
         if (!canBegin) {
-            Serial.println("[OTA] Error: Insufficient flash partition space for OTA update");
+            Serial.printf("[OTA] Error: Insufficient flash partition space for OTA update (%d bytes needed)\n", contentLength);
             http.end();
             return false;
         }
 
         WiFiClient* stream = http.getStreamPtr();
-        size_t written = Update.writeStream(*stream);
+        size_t written = 0;
+        uint8_t buff[1024];
+        while (http.connected() && (written < (size_t)contentLength)) {
+            esp_task_wdt_reset();
+            size_t available = stream->available();
+            if (available) {
+                int readBytes = stream->readBytes(buff, min(available, sizeof(buff)));
+                if (readBytes > 0) {
+                    Update.write(buff, readBytes);
+                    written += readBytes;
+                }
+            } else {
+                delay(10);
+            }
+        }
 
         if (written == (size_t)contentLength) {
-            Serial.printf("[OTA] Transferred %u bytes successfully\n", written);
+            Serial.printf("[OTA] Transferred %u bytes successfully\n", (unsigned int)written);
         } else {
-            Serial.printf("[OTA] Incomplete write: %u/%d bytes (Error #%d)\n", written, contentLength, Update.getError());
+            Serial.printf("[OTA] Incomplete write: %u/%d bytes (Error #%d)\n", (unsigned int)written, contentLength, Update.getError());
         }
 
         if (Update.end()) {
