@@ -518,8 +518,7 @@ void AutomationEngine::evaluateNightCycle(uint32_t now) {
             // Stage 1: Turn on AC to bring room temperature to 27C initially (max 60m safety guard)
             bool targetAchieved = reading.valid && (currentTemp <= _config.nightCycle.targetTemp);
             bool maxTimeout = (stageElapsedSec >= 3600);
-            bool sensorInvalidFallback = !reading.valid && maxTimeout;
-            if (targetAchieved || maxTimeout || sensorInvalidFallback) {
+            if (targetAchieved || maxTimeout) {
                 if (_safety.canTurnOff(now, reason)) {
                     _ac.setPower(false, "night_cycle_target_27c_reached");
                     _safety.recordPowerTransition(false, now);
@@ -567,8 +566,7 @@ void AutomationEngine::evaluateNightCycle(uint32_t now) {
             // Stage 3: Bring temperature back to 27C (max 45m safety guard)
             bool targetAchieved = reading.valid && (currentTemp <= _config.nightCycle.targetTemp);
             bool maxTimeout = (stageElapsedSec >= 2700);
-            bool sensorInvalidFallback = !reading.valid && maxTimeout;
-            if (targetAchieved || maxTimeout || sensorInvalidFallback) {
+            if (targetAchieved || maxTimeout) {
                 if (_safety.canTurnOff(now, reason)) {
                     _ac.setPower(false, "night_cycle_cycle2_reached");
                     _safety.recordPowerTransition(false, now);
@@ -617,8 +615,7 @@ void AutomationEngine::evaluateNightCycle(uint32_t now) {
             // Stage 5: Mid-night maintenance cool to 27C with low blower
             bool targetAchieved = reading.valid && (currentTemp <= _config.nightCycle.targetTemp);
             bool maxTimeout = (stageElapsedSec >= 1800);
-            bool sensorInvalidFallback = !reading.valid && maxTimeout;
-            if (targetAchieved || maxTimeout || sensorInvalidFallback) {
+            if (targetAchieved || maxTimeout) {
                 bool shouldTransition = false;
                 if (_safety.canTurnOff(now, reason)) {
                     _ac.setPower(false, "night_cycle_midnight_reached");
