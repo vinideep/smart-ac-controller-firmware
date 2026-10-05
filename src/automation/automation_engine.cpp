@@ -82,7 +82,8 @@ void AutomationEngine::loadFromNVS() {
         _config.nightCycle.enabled = prefs.getBool("night_en", _config.nightCycle.enabled);
         _config.nightCycle.targetTemp = prefs.getFloat("night_tgt", _config.nightCycle.targetTemp);
         if (_config.nightCycle.enabled) {
-            _nightCycleStage = NightCycleStage::InitialPulldown;
+            _nightCycleStage = (NightCycleStage)prefs.getUInt("night_stg", (uint32_t)NightCycleStage::InitialPulldown);
+            _config.nightCycle.preDawnTriggered = prefs.getBool("night_pdt", false);
             _config.nightCycle.stageStartTimeMs = millis();
         }
         prefs.end();
@@ -109,6 +110,10 @@ void AutomationEngine::saveToNVS() {
         prefs.putBool("inv_mode", _config.continuousInverterMode);
         prefs.putBool("night_en", _config.nightCycle.enabled);
         prefs.putFloat("night_tgt", _config.nightCycle.targetTemp);
+        if (_config.nightCycle.enabled) {
+            prefs.putUInt("night_stg", (uint32_t)_nightCycleStage);
+            prefs.putBool("night_pdt", _config.nightCycle.preDawnTriggered);
+        }
         prefs.end();
     }
 #endif
@@ -257,6 +262,10 @@ void AutomationEngine::setNightCycle(bool enable, float targetTemp, int8_t overr
         } else if (curH >= 0 && curH < 3) {
             // Midnight - 2:59 AM: Mid-night cooling to 27C, or extended pause if already cool
             _nightCycleStage = alreadyCool ? NightCycleStage::Midnight_PauseExtended : NightCycleStage::Midnight_Cool27;
+            if (_nightCycleStage == NightCycleStage::Midnight_PauseExtended) {
+                uint32_t secUntil3am = (2 - curH) * 3600 + (59 - curM) * 60 + 60;
+                _config.nightCycle.midnightPauseSec = max((uint32_t)2700, secUntil3am);
+            }
         } else if (curH >= 3 && curH < 5) {
             // 3:00 AM - 4:59 AM: Pre-dawn 20-minute burst window
             _nightCycleStage = NightCycleStage::PreDawn_Burst20m;
@@ -282,11 +291,9 @@ void AutomationEngine::setNightCycle(bool enable, float targetTemp, int8_t overr
                 _safety.recordPowerTransition(true, now);
             }
         } else {
+            _ac.setPower(false, "night_cycle_pause_start_forced");
             if (_safety.canTurnOff(now, reason)) {
-                _ac.setPower(false, "night_cycle_pause_start");
                 _safety.recordPowerTransition(false, now);
-            } else if (!_safety.isAcPowered()) {
-                _ac.setPower(false, "night_cycle_pause_start_untracked");
             }
         }
         logEvent("night_cycle_started", "time_calibrated_start", _dht.getLatestReading().temperature_c);
@@ -511,7 +518,8 @@ void AutomationEngine::evaluateNightCycle(uint32_t now) {
             // Stage 1: Turn on AC to bring room temperature to 27C initially (max 60m safety guard)
             bool targetAchieved = reading.valid && (currentTemp <= _config.nightCycle.targetTemp);
             bool maxTimeout = (stageElapsedSec >= 3600);
-            if (targetAchieved || maxTimeout) {
+            bool sensorInvalidFallback = !reading.valid && maxTimeout;
+            if (targetAchieved || maxTimeout || sensorInvalidFallback) {
                 if (_safety.canTurnOff(now, reason)) {
                     _ac.setPower(false, "night_cycle_target_27c_reached");
                     _safety.recordPowerTransition(false, now);
@@ -535,6 +543,12 @@ void AutomationEngine::evaluateNightCycle(uint32_t now) {
 
         case NightCycleStage::Pause1_30m: {
             // Stage 2: Turn off AC for 30 minutes
+            if (_safety.isAcPowered()) {
+                if (_safety.canTurnOff(now, reason)) {
+                    _ac.setPower(false, "night_cycle_pause_enforce");
+                    _safety.recordPowerTransition(false, now);
+                }
+            }
             bool timeElapsed = (stageElapsedSec >= _config.nightCycle.pause1DurationSec);
             bool overheatEarly = reading.valid && (currentTemp >= _config.nightCycle.targetTemp + 2.5f) && (stageElapsedSec >= 600);
             if (timeElapsed || overheatEarly) {
@@ -553,7 +567,8 @@ void AutomationEngine::evaluateNightCycle(uint32_t now) {
             // Stage 3: Bring temperature back to 27C (max 45m safety guard)
             bool targetAchieved = reading.valid && (currentTemp <= _config.nightCycle.targetTemp);
             bool maxTimeout = (stageElapsedSec >= 2700);
-            if (targetAchieved || maxTimeout) {
+            bool sensorInvalidFallback = !reading.valid && maxTimeout;
+            if (targetAchieved || maxTimeout || sensorInvalidFallback) {
                 if (_safety.canTurnOff(now, reason)) {
                     _ac.setPower(false, "night_cycle_cycle2_reached");
                     _safety.recordPowerTransition(false, now);
@@ -577,6 +592,12 @@ void AutomationEngine::evaluateNightCycle(uint32_t now) {
 
         case NightCycleStage::Pause2_40m: {
             // Stage 4: Turn off AC for 40 minutes (auto-advances to midnight if clock is >= 00:00)
+            if (_safety.isAcPowered()) {
+                if (_safety.canTurnOff(now, reason)) {
+                    _ac.setPower(false, "night_cycle_pause_enforce");
+                    _safety.recordPowerTransition(false, now);
+                }
+            }
             bool timeElapsed = (stageElapsedSec >= _config.nightCycle.pause2DurationSec);
             bool overheatEarly = reading.valid && (currentTemp >= _config.nightCycle.targetTemp + 2.5f) && (stageElapsedSec >= 600);
             bool midnightClockReached = hasClock && (curH >= 0 && curH < 3 && stageElapsedSec >= 900);
@@ -596,7 +617,8 @@ void AutomationEngine::evaluateNightCycle(uint32_t now) {
             // Stage 5: Mid-night maintenance cool to 27C with low blower
             bool targetAchieved = reading.valid && (currentTemp <= _config.nightCycle.targetTemp);
             bool maxTimeout = (stageElapsedSec >= 1800);
-            if (targetAchieved || maxTimeout) {
+            bool sensorInvalidFallback = !reading.valid && maxTimeout;
+            if (targetAchieved || maxTimeout || sensorInvalidFallback) {
                 bool shouldTransition = false;
                 if (_safety.canTurnOff(now, reason)) {
                     _ac.setPower(false, "night_cycle_midnight_reached");
@@ -632,6 +654,12 @@ void AutomationEngine::evaluateNightCycle(uint32_t now) {
 
         case NightCycleStage::Midnight_PauseExtended: {
             // Stage 6: Mid-night extended OFF period (reduced cooling demand)
+            if (_safety.isAcPowered()) {
+                if (_safety.canTurnOff(now, reason)) {
+                    _ac.setPower(false, "night_cycle_pause_enforce");
+                    _safety.recordPowerTransition(false, now);
+                }
+            }
             bool timeElapsed = (stageElapsedSec >= _config.nightCycle.midnightPauseSec);
             bool clockHit3am = hasClock && (curH >= 3);
             bool overheatEarly = reading.valid && (currentTemp >= _config.nightCycle.targetTemp + 2.5f) && (stageElapsedSec >= 1800);
@@ -670,6 +698,12 @@ void AutomationEngine::evaluateNightCycle(uint32_t now) {
 
         case NightCycleStage::PreDawn_Pause2h: {
             // Stage 8: Turn OFF for 2 hours (7200s) or until morning wakeup (>= 06:00 AM)
+            if (_safety.isAcPowered()) {
+                if (_safety.canTurnOff(now, reason)) {
+                    _ac.setPower(false, "night_cycle_pause_enforce");
+                    _safety.recordPowerTransition(false, now);
+                }
+            }
             bool pauseComplete = (stageElapsedSec >= _config.nightCycle.preDawnPauseSec);
             bool morningWakeup = hasClock && (curH >= 6 && curH < 20);
             if (pauseComplete || morningWakeup) {
