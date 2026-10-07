@@ -2367,7 +2367,49 @@ int main() {
         std::cout << "[TEST 75] PASS: Thermal stall suspension clamps synthetic energy accumulation to 2.5W standby" << std::endl;
     }
 
-    std::cout << "\nALL 75 UNIT TESTS PASSED SUCCESSFULLY!" << std::endl;
+    // Test 76: OTA firmware version format and command payload verification
+    {
+        // 1. Verify semantic version string format
+        std::string fwVer = "v1.3.1";
+        assert(fwVer.length() >= 5);
+        assert(fwVer[0] == 'v');
+        size_t dot1 = fwVer.find('.');
+        size_t dot2 = fwVer.rfind('.');
+        assert(dot1 != std::string::npos && dot2 != std::string::npos && dot1 != dot2);
+
+        // 2. Validate OTA flash command URL scheme & host parsing
+        auto isValidOtaUrl = [](const std::string& url) -> bool {
+            if (url.rfind("http://", 0) != 0 && url.rfind("https://", 0) != 0) return false;
+            size_t hostStart = url.find("://") + 3;
+            if (hostStart >= url.length()) return false;
+            size_t pathStart = url.find('/', hostStart);
+            std::string host = (pathStart == std::string::npos) ? url.substr(hostStart) : url.substr(hostStart, pathStart - hostStart);
+            return !host.empty() && host != "0.0.0.0";
+        };
+
+        assert(isValidOtaUrl("http://192.168.1.6:4000/api/ota/firmware.bin"));
+        assert(isValidOtaUrl("https://deepi-home-server.tail07616e.ts.net/api/ota/firmware.bin"));
+        assert(!isValidOtaUrl("ftp://192.168.1.6/firmware.bin"));
+        assert(!isValidOtaUrl("http://0.0.0.0/api/ota/firmware.bin"));
+        assert(!isValidOtaUrl("invalid_url"));
+
+        // 3. Validate MD5 format (32 hex chars)
+        auto isValidMd5 = [](const std::string& md5) -> bool {
+            if (md5.length() != 32) return false;
+            for (char c : md5) {
+                if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'))) return false;
+            }
+            return true;
+        };
+
+        assert(isValidMd5("194f40f836de0e9c5ff340560fcc6071"));
+        assert(!isValidMd5("194f40f836de0e9c5ff340560fcc607")); // 31 chars
+        assert(!isValidMd5("194f40f836de0e9c5ff340560fcc607z")); // non-hex char
+
+        std::cout << "[TEST 76] PASS: OTA firmware version format and command payload verification" << std::endl;
+    }
+
+    std::cout << "\nALL 76 UNIT TESTS PASSED SUCCESSFULLY!" << std::endl;
     return 0;
 }
 
