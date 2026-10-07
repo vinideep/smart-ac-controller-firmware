@@ -318,7 +318,32 @@ void processCommand(const String& rawCmd) {
                 const char* ver = doc["version"] | "";
                 Serial.printf("[OTA] Firmware update requested. URL: %s | MD5: %s | Ver: %s\n", otaUrl, md5, ver);
                 if (strlen(otaUrl) > 0) {
-                    ac::ota::OtaManager::performOta(String(otaUrl), String(md5));
+                    if (!ac::ota::OtaManager::performOta(String(otaUrl), String(md5))) {
+                        String errMsg = ac::ota::OtaManager::getLastError();
+                        if (errMsg.length() == 0) {
+                            errMsg = "OTA flash rejected or failed on controller";
+                        }
+                        Serial.printf("[OTA] Firmware update failed: %s\n", errMsg.c_str());
+                        if (cloudClient.isEnabled()) {
+                            JsonDocument errDoc;
+                            errDoc["device_id"] = deviceId;
+                            errDoc["ota_status"] = "failed";
+                            errDoc["ota_error"] = errMsg;
+                            errDoc["timestamp_ms"] = millis();
+                            cloudClient.pushTelemetry(errDoc);
+                        }
+                    }
+                } else if (strcmp(commandType, "ota_flash") == 0) {
+                    String errMsg = "OTA flash command missing download URL";
+                    Serial.println("[OTA] Error: Missing URL in ota_flash command");
+                    if (cloudClient.isEnabled()) {
+                        JsonDocument errDoc;
+                        errDoc["device_id"] = deviceId;
+                        errDoc["ota_status"] = "failed";
+                        errDoc["ota_error"] = errMsg;
+                        errDoc["timestamp_ms"] = millis();
+                        cloudClient.pushTelemetry(errDoc);
+                    }
                 } else {
                     Serial.println("[OTA] Standby: Firmware staged. Awaiting binary stream pull.");
                 }

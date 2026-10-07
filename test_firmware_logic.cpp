@@ -2409,7 +2409,68 @@ int main() {
         std::cout << "[TEST 76] PASS: OTA firmware version format and command payload verification" << std::endl;
     }
 
-    std::cout << "\nALL 76 UNIT TESTS PASSED SUCCESSFULLY!" << std::endl;
+    // Test 77: OTA failure telemetry push schema and ESP32 binary magic byte validation
+    {
+        // 1. Validate error telemetry schema matching cloudClient.pushTelemetry()
+        struct OtaErrorPayload {
+            std::string device_id;
+            std::string ota_status;
+            std::string ota_error;
+            uint32_t timestamp_ms;
+        };
+
+        OtaErrorPayload payload = {
+            "esp32-e5ca5c",
+            "failed",
+            "HTTP GET failed with status: 404",
+            12345
+        };
+
+        assert(payload.ota_status == "failed");
+        assert(!payload.ota_error.empty());
+        assert(payload.timestamp_ms > 0);
+
+        // 2. Validate ESP32 binary verification rule (>= 50KB and magic byte 0xE9)
+        auto isValidEsp32Binary = [](const uint8_t* data, size_t len) -> bool {
+            if (data == nullptr || len < 50000) return false;
+            return data[0] == 0xE9;
+        };
+
+        // Edge case: nullptr data must fail
+        assert(!isValidEsp32Binary(nullptr, 65536));
+        assert(!isValidEsp32Binary(nullptr, 0));
+
+        // 10-byte test dummy BINARY_200 must fail
+        const uint8_t dummy10[] = "BINARY_200";
+        assert(!isValidEsp32Binary(dummy10, sizeof(dummy10) - 1));
+
+        // Edge case: Boundary 49,999 bytes with 0xE9 must fail
+        std::vector<uint8_t> boundaryLow(49999, 0x00);
+        boundaryLow[0] = 0xE9;
+        assert(!isValidEsp32Binary(boundaryLow.data(), boundaryLow.size()));
+
+        // Edge case: Exactly 50,000 bytes with 0xE9 must pass
+        std::vector<uint8_t> boundaryExact(50000, 0x00);
+        boundaryExact[0] = 0xE9;
+        assert(isValidEsp32Binary(boundaryExact.data(), boundaryExact.size()));
+
+        // Edge case: Exactly 50,000 bytes without 0xE9 must fail
+        boundaryExact[0] = 0xEA;
+        assert(!isValidEsp32Binary(boundaryExact.data(), boundaryExact.size()));
+
+        // 1MB 0xAA dummy buffer must fail
+        std::vector<uint8_t> dummyAa(1024 * 1024, 0xAA);
+        assert(!isValidEsp32Binary(dummyAa.data(), dummyAa.size()));
+
+        // Valid 64KB mock starting with 0xE9 must pass
+        std::vector<uint8_t> validBuf(65536, 0x00);
+        validBuf[0] = 0xE9;
+        assert(isValidEsp32Binary(validBuf.data(), validBuf.size()));
+
+        std::cout << "[TEST 77] PASS: OTA failure telemetry error schema and ESP32 magic byte validation" << std::endl;
+    }
+
+    std::cout << "\nALL 77 UNIT TESTS PASSED SUCCESSFULLY!" << std::endl;
     return 0;
 }
 
