@@ -1,0 +1,66 @@
+name: Build and Publish Firmware Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build ESP32 Firmware
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install PlatformIO
+        run: |
+          python -m pip install --upgrade pip
+          pip install --upgrade platformio
+
+      - name: Build Firmware
+        run: |
+          pio run -e esp32dev
+
+      - name: Verify Binary Integrity
+        run: |
+          python -c "
+          import sys
+          with open('.pio/build/esp32dev/firmware.bin', 'rb') as f:
+              data = f.read()
+          if len(data) < 50000:
+              print(f'Error: Binary size too small ({len(data)} bytes)')
+              sys.exit(1)
+          if data[0] != 0xE9:
+              print(f'Error: Magic byte mismatch (expected 0xE9, got 0x{data[0]:02X})')
+              sys.exit(1)
+          print(f'Binary verified: {len(data)} bytes with magic byte 0xE9')
+          "
+
+      - name: Create GitHub Release and Upload Asset
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          name: ${{ github.ref_name }} Wireless Cloud Release
+          body: |
+            Automated cloud release for AzureEssence Smart AC Controller.
+            - Dual-bank OTA partition support
+            - Psychrometric climate engine
+            - Circadian sleep automation
+            - Verified ESP32 bootloader binary
+          files: .pio/build/esp32dev/firmware.bin
+          draft: false
+          prerelease: false
