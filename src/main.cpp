@@ -182,8 +182,9 @@ void processCommand(const String& rawCmd) {
                 float maxT = doc["max_temp"] | 25.5f;
                 automationEngine.setCircadianSleep(en, pdown, ramp, maxT);
             } else if (strcmp(commandType, "night_cycle") == 0) {
-                bool en = !doc["enabled"].isNull() ? doc["enabled"].as<bool>() : (!doc["value"].isNull() ? doc["value"].as<bool>() : false);
-                float tgt = doc["target_temp"] | doc["target"] | 27.0f;
+                bool en = !doc["enabled"].isNull() ? doc["enabled"].as<bool>() : (!doc["value"].isNull() ? doc["value"].as<bool>() : automationEngine.isNightCycleEnabled());
+                float tgt = !doc["target_temp"].isNull() ? doc["target_temp"].as<float>() :
+                            (!doc["target"].isNull() ? doc["target"].as<float>() : automationEngine.getNightCycleTargetTemp());
                 int8_t h = doc["hour"] | -1;
                 int8_t m = doc["min"] | -1;
                 if (!doc["epoch"].isNull()) {
@@ -218,8 +219,13 @@ void processCommand(const String& rawCmd) {
                     automationEngine.setCircadianSleep(doc["sleep_enabled"].as<bool>(), doc["pulldown_temp"] | 23, doc["ramp_rate"] | 0.5f, doc["max_temp"] | 25.5f);
                 }
                 if (!doc["night_cycle_enabled"].isNull()) {
-                    float tgt = doc["night_cycle_target"] | doc["target_temp"] | 27.0f;
+                    float tgt = !doc["night_cycle_target_temp"].isNull() ? doc["night_cycle_target_temp"].as<float>() :
+                                (!doc["night_cycle_target"].isNull() ? doc["night_cycle_target"].as<float>() :
+                                (!doc["target_temp"].isNull() ? doc["target_temp"].as<float>() : automationEngine.getNightCycleTargetTemp()));
                     automationEngine.setNightCycle(doc["night_cycle_enabled"].as<bool>(), tgt);
+                } else if (!doc["night_cycle_target_temp"].isNull() || !doc["night_cycle_target"].isNull()) {
+                    float tgt = !doc["night_cycle_target_temp"].isNull() ? doc["night_cycle_target_temp"].as<float>() : doc["night_cycle_target"].as<float>();
+                    automationEngine.setNightCycle(automationEngine.isNightCycleEnabled(), tgt);
                 }
                 Serial.println("[CMD_OK] Automation engine configuration updated");
             } else if (strcmp(commandType, "state") == 0) {
@@ -659,12 +665,12 @@ void processCommand(const String& rawCmd) {
             rest.trim();
             int secondSpace = rest.indexOf(' ');
             bool en = false;
-            float tgt = 27.0f;
+            float tgt = automationEngine.getNightCycleTargetTemp();
             if (secondSpace > 0) {
                 String enStr = rest.substring(0, secondSpace);
                 en = (enStr == "1" || enStr == "ON" || enStr == "TRUE");
                 tgt = rest.substring(secondSpace + 1).toFloat();
-                if (tgt < 18.0f || tgt > 31.0f) tgt = 27.0f;
+                if (tgt < 16.0f || tgt > 31.0f) tgt = automationEngine.getNightCycleTargetTemp();
             } else {
                 en = (rest == "1" || rest == "ON" || rest == "TRUE");
             }

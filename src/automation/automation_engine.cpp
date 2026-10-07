@@ -238,11 +238,28 @@ const char* AutomationEngine::getSleepStageStr() const {
 }
 
 void AutomationEngine::setNightCycle(bool enable, float targetTemp, int8_t overrideHour, int8_t overrideMin) {
+    bool wasEnabled = _config.nightCycle.enabled;
     _config.nightCycle.enabled = enable;
-    if (targetTemp >= 18.0f && targetTemp <= 31.0f) {
+    if (targetTemp >= 16.0f && targetTemp <= 31.0f) {
         _config.nightCycle.targetTemp = targetTemp;
     }
+    saveToNVS();
     if (enable) {
+        if (wasEnabled && overrideHour < 0) {
+            if (_nightCycleStage == NightCycleStage::InitialPulldown || 
+                _nightCycleStage == NightCycleStage::Cycle2_Cool27 || 
+                _nightCycleStage == NightCycleStage::Midnight_Cool27 || 
+                _nightCycleStage == NightCycleStage::PreDawn_Burst20m) {
+                uint8_t t = (uint8_t)round(_config.nightCycle.targetTemp);
+                if (t < 16) t = 16;
+                if (t > 31) t = 31;
+                const char* fan = (_nightCycleStage == NightCycleStage::PreDawn_Burst20m || 
+                                   _nightCycleStage == NightCycleStage::Midnight_Cool27) ? "low" : "auto";
+                _ac.setState(true, t, "cool", fan, "night_cycle_target_update");
+            }
+            return;
+        }
+
         uint8_t curH = 0, curM = 0, curS = 0;
         bool hasTime = getLocalTime(curH, curM, curS);
         if (overrideHour >= 0 && overrideHour < 24) {
@@ -266,13 +283,13 @@ void AutomationEngine::setNightCycle(bool enable, float targetTemp, int8_t overr
 
         // Auto-adjust starting phase based on current time of the location
         if (curH >= 21 && curH < 23) {
-            // 9 PM - 10:59 PM (e.g. 10 PM): Stage 1 initial pulldown to 27C, or pause 1 if already cool
+            // 9 PM - 10:59 PM (e.g. 10 PM): Stage 1 initial pulldown to target, or pause 1 if already cool
             _nightCycleStage = alreadyCool ? NightCycleStage::Pause1_30m : NightCycleStage::InitialPulldown;
         } else if (curH == 23) {
-            // 11 PM: Room pulldown to 27C, or pause 2 if already cool
+            // 11 PM: Room pulldown to target, or pause 2 if already cool
             _nightCycleStage = alreadyCool ? NightCycleStage::Pause2_40m : NightCycleStage::InitialPulldown;
         } else if (curH >= 0 && curH < 3) {
-            // Midnight - 2:59 AM: Mid-night cooling to 27C, or extended pause if already cool
+            // Midnight - 2:59 AM: Mid-night cooling to target, or extended pause if already cool
             _nightCycleStage = alreadyCool ? NightCycleStage::Midnight_PauseExtended : NightCycleStage::Midnight_Cool27;
             if (_nightCycleStage == NightCycleStage::Midnight_PauseExtended) {
                 uint32_t secUntil3am = (2 - curH) * 3600 + (59 - curM) * 60 + 60;
@@ -297,6 +314,8 @@ void AutomationEngine::setNightCycle(bool enable, float targetTemp, int8_t overr
             _nightCycleStage == NightCycleStage::PreDawn_Burst20m) {
             if (_safety.canTurnOn(now, reason)) {
                 uint8_t t = (uint8_t)round(_config.nightCycle.targetTemp);
+                if (t < 16) t = 16;
+                if (t > 31) t = 31;
                 const char* fan = (_nightCycleStage == NightCycleStage::PreDawn_Burst20m || 
                                    _nightCycleStage == NightCycleStage::Midnight_Cool27) ? "low" : "auto";
                 _ac.setState(true, t, "cool", fan, "night_cycle_start");
@@ -494,12 +513,15 @@ void AutomationEngine::evaluateNightCycle(uint32_t now) {
     uint32_t stageElapsedSec = stageElapsedMs / 1000;
     const char* reason = nullptr;
     uint8_t targetByte = (uint8_t)round(_config.nightCycle.targetTemp);
+    if (targetByte < 16) targetByte = 16;
+    if (targetByte > 31) targetByte = 31;
 
     uint8_t curH = 0, curM = 0, curS = 0;
     bool hasClock = getLocalTime(curH, curM, curS);
 
-    // Freeze protection safeguard: if room drops below 18C, turn off immediately
-    if (_safety.isAcPowered() && currentTemp < 18.0f) {
+    // Freeze protection safeguard: if room drops below safe threshold, turn off immediately
+    float freezeThreshold = min(18.0f, max(15.0f, _config.nightCycle.targetTemp - 1.0f));
+    if (_safety.isAcPowered() && currentTemp < freezeThreshold) {
         if (_safety.canTurnOff(now, reason)) {
             _ac.setPower(false, "freeze_protection_cutoff");
             _safety.recordPowerTransition(false, now);
@@ -548,6 +570,8 @@ void AutomationEngine::evaluateNightCycle(uint32_t now) {
                     _ac.setState(true, targetByte, "cool", "auto", "night_cycle_pulldown");
                     _safety.recordPowerTransition(true, now);
                 }
+            } else if (_ac.getState().temperature != targetByte) {
+                _ac.setTemperature(targetByte, "night_cycle_target_sync");
             }
             break;
         }
@@ -596,6 +620,8 @@ void AutomationEngine::evaluateNightCycle(uint32_t now) {
                     _ac.setState(true, targetByte, "cool", "auto", "night_cycle_cool2");
                     _safety.recordPowerTransition(true, now);
                 }
+            } else if (_ac.getState().temperature != targetByte) {
+                _ac.setTemperature(targetByte, "night_cycle_target_sync");
             }
             break;
         }
@@ -657,6 +683,8 @@ void AutomationEngine::evaluateNightCycle(uint32_t now) {
                     _ac.setState(true, targetByte, "cool", "low", "night_cycle_midnight_cool");
                     _safety.recordPowerTransition(true, now);
                 }
+            } else if (_ac.getState().temperature != targetByte) {
+                _ac.setTemperature(targetByte, "night_cycle_target_sync");
             }
             break;
         }
@@ -701,6 +729,8 @@ void AutomationEngine::evaluateNightCycle(uint32_t now) {
                     _ac.setState(true, targetByte, "cool", "low", "night_cycle_predawn_burst");
                     _safety.recordPowerTransition(true, now);
                 }
+            } else if (_ac.getState().temperature != targetByte) {
+                _ac.setTemperature(targetByte, "night_cycle_target_sync");
             }
             break;
         }

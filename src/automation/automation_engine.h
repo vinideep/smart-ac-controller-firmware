@@ -156,7 +156,7 @@ public:
     uint8_t getLocalMinute() const;
     bool hasValidTime() const;
 
-    void setNightCycle(bool enable, float targetTemp = 27.0f, int8_t overrideHour = -1, int8_t overrideMin = -1);
+    void setNightCycle(bool enable, float targetTemp = -1.0f, int8_t overrideHour = -1, int8_t overrideMin = -1);
     bool isNightCycleEnabled() const { return _config.nightCycle.enabled; }
     NightCycleStage getNightCycleStage() const { return _nightCycleStage; }
     const char* getNightCycleStageStr() const;

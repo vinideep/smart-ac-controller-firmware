@@ -618,8 +618,9 @@ void LocalAPIServer::handleNightCycle() {
             JsonDocument doc;
             DeserializationError err = deserializeJson(doc, _server.arg("plain"));
             if (!err) {
-                bool enabled = doc["enabled"] | true;
-                float targetTemp = doc["target_temp"] | 27.0f;
+                bool enabled = doc["enabled"] | _automation.isNightCycleEnabled();
+                float targetTemp = !doc["target_temp"].isNull() ? doc["target_temp"].as<float>() :
+                                   (!doc["target"].isNull() ? doc["target"].as<float>() : _automation.getNightCycleTargetTemp());
                 int8_t h = doc["hour"] | -1;
                 int8_t m = doc["min"] | -1;
                 if (doc["epoch"].is<uint32_t>()) {
@@ -632,7 +633,7 @@ void LocalAPIServer::handleNightCycle() {
                 _automation.setNightCycle(enabled, targetTemp, h, m);
             }
         } else {
-            _automation.setNightCycle(!_automation.isNightCycleEnabled(), 27.0f);
+            _automation.setNightCycle(!_automation.isNightCycleEnabled(), _automation.getNightCycleTargetTemp());
         }
     }
 
@@ -640,7 +641,7 @@ void LocalAPIServer::handleNightCycle() {
     resp["enabled"] = _automation.isNightCycleEnabled();
     resp["stage"] = (uint8_t)_automation.getNightCycleStage();
     resp["stage_str"] = _automation.getNightCycleStageStr();
-    resp["target_temp"] = 27.0f;
+    resp["target_temp"] = _automation.getNightCycleTargetTemp();
     resp["stage_remaining_s"] = _automation.getNightCycleStageRemainingSec();
     resp["ac_power"] = _ac.getState().power;
     const DHTReading& dht = _dht.getLatestReading();

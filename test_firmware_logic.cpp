@@ -449,6 +449,100 @@ public:
         return m;
     }
 
+    enum NightCycleStage {
+        NC_INACTIVE,
+        NC_INITIAL_PULLDOWN,
+        NC_PAUSE1_30M,
+        NC_CYCLE2_COOL,
+        NC_PAUSE2_40M,
+        NC_MIDNIGHT_COOL,
+        NC_MIDNIGHT_PAUSE,
+        NC_PREDAWN_BURST,
+        NC_PREDAWN_PAUSE,
+        NC_COMPLETED
+    };
+
+    struct NightCycleConfig {
+        bool enabled = false;
+        float targetTemp = 27.0f;
+        uint32_t pause1DurationSec = 1800;
+        uint32_t pause2DurationSec = 2400;
+        uint32_t midnightPauseSec = 4500;
+        uint32_t preDawnBurstSec = 1200;
+        uint32_t preDawnPauseSec = 7200;
+        uint32_t stageStartTimeMs = 0;
+        uint8_t startHour = 22;
+        uint8_t startMinute = 0;
+        bool preDawnTriggered = false;
+    };
+
+    NightCycleConfig nightCycle;
+    NightCycleStage nightCycleStage = NC_INACTIVE;
+
+    void setNightCycle(bool enable, float targetTemp = -1.0f, int8_t overrideHour = -1, int8_t overrideMin = -1, float currentTemp = 26.5f, uint32_t now = 0) {
+        bool wasEnabled = nightCycle.enabled;
+        nightCycle.enabled = enable;
+        if (targetTemp >= 16.0f && targetTemp <= 31.0f) {
+            nightCycle.targetTemp = targetTemp;
+        }
+        if (enable) {
+            if (wasEnabled && overrideHour < 0) {
+                return;
+            }
+            uint8_t curH = 0, curM = 0, curS = 0;
+            bool hasTime = getLocalTime(curH, curM, curS, now);
+            if (overrideHour >= 0 && overrideHour < 24) {
+                curH = overrideHour;
+                curM = (overrideMin >= 0 && overrideMin < 60) ? overrideMin : 0;
+                hasTime = true;
+            } else if (!hasTime) {
+                curH = 22;
+                curM = 0;
+            }
+
+            nightCycle.startHour = curH;
+            nightCycle.startMinute = curM;
+            nightCycle.stageStartTimeMs = now;
+            nightCycle.preDawnTriggered = false;
+            enabled = true;
+            userManualPowerOff = false;
+
+            bool alreadyCool = (currentTemp <= nightCycle.targetTemp);
+            if (curH >= 21 && curH < 23) {
+                nightCycleStage = alreadyCool ? NC_PAUSE1_30M : NC_INITIAL_PULLDOWN;
+            } else if (curH == 23) {
+                nightCycleStage = alreadyCool ? NC_PAUSE2_40M : NC_INITIAL_PULLDOWN;
+            } else if (curH >= 0 && curH < 3) {
+                nightCycleStage = alreadyCool ? NC_MIDNIGHT_PAUSE : NC_MIDNIGHT_COOL;
+            } else if (curH >= 3 && curH < 5) {
+                nightCycleStage = NC_PREDAWN_BURST;
+                nightCycle.preDawnTriggered = true;
+            } else if (curH >= 5 && curH < 8) {
+                nightCycleStage = NC_PREDAWN_PAUSE;
+            } else {
+                nightCycleStage = alreadyCool ? NC_PAUSE1_30M : NC_INITIAL_PULLDOWN;
+            }
+        } else {
+            nightCycleStage = NC_INACTIVE;
+        }
+    }
+
+    uint32_t getNightCycleStageRemainingSec(uint32_t now) const {
+        if (!nightCycle.enabled || nightCycleStage == NC_INACTIVE || nightCycleStage == NC_COMPLETED) return 0;
+        uint32_t elapsedSec = (now - nightCycle.stageStartTimeMs) / 1000;
+        switch (nightCycleStage) {
+            case NC_INITIAL_PULLDOWN: return (elapsedSec >= 3600) ? 0 : (3600 - elapsedSec);
+            case NC_PAUSE1_30M:       return (elapsedSec >= nightCycle.pause1DurationSec) ? 0 : (nightCycle.pause1DurationSec - elapsedSec);
+            case NC_CYCLE2_COOL:      return (elapsedSec >= 2700) ? 0 : (2700 - elapsedSec);
+            case NC_PAUSE2_40M:       return (elapsedSec >= nightCycle.pause2DurationSec) ? 0 : (nightCycle.pause2DurationSec - elapsedSec);
+            case NC_MIDNIGHT_COOL:    return (elapsedSec >= 1800) ? 0 : (1800 - elapsedSec);
+            case NC_MIDNIGHT_PAUSE:   return (elapsedSec >= nightCycle.midnightPauseSec) ? 0 : (nightCycle.midnightPauseSec - elapsedSec);
+            case NC_PREDAWN_BURST:    return (elapsedSec >= nightCycle.preDawnBurstSec) ? 0 : (nightCycle.preDawnBurstSec - elapsedSec);
+            case NC_PREDAWN_PAUSE:    return (elapsedSec >= nightCycle.preDawnPauseSec) ? 0 : (nightCycle.preDawnPauseSec - elapsedSec);
+            default: return 0;
+        }
+    }
+
     enum Action { NONE, TURN_ON, TURN_OFF };
 
     Action evaluate(bool acOn, bool isPresent, uint32_t emptyDurationSec, float currentTemp, uint32_t now, const TestSafetyManager& safety) {
@@ -2470,7 +2564,99 @@ int main() {
         std::cout << "[TEST 77] PASS: OTA failure telemetry error schema and ESP32 magic byte validation" << std::endl;
     }
 
-    std::cout << "\nALL 77 UNIT TESTS PASSED SUCCESSFULLY!" << std::endl;
+    // Test 78: Night Sleep Automation configurable target temperature [16°C - 30°C] & multi-phase thermal execution
+    {
+        TestAutomationEngine engine;
+        engine.syncTime(1700000000, 330, 0);
+
+        // 1. Boundary checking and clamping [16°C - 30°C / 31°C]
+        engine.setNightCycle(true, 22.0f, 22, 0, 26.0f, 1000);
+        assert(std::fabs(engine.nightCycle.targetTemp - 22.0f) < 0.01f);
+        assert(engine.nightCycleStage == TestAutomationEngine::NC_INITIAL_PULLDOWN);
+
+        // Lower boundary: 16°C
+        engine.setNightCycle(true, 16.0f, 22, 0, 24.0f, 2000);
+        assert(std::fabs(engine.nightCycle.targetTemp - 16.0f) < 0.01f);
+
+        // Upper boundary: 30°C
+        engine.setNightCycle(true, 30.0f, 22, 0, 32.0f, 3000);
+        assert(std::fabs(engine.nightCycle.targetTemp - 30.0f) < 0.01f);
+
+        // Reject out-of-bounds low (< 16°C preserves previous setpoint)
+        engine.setNightCycle(true, 12.0f, 22, 0, 25.0f, 4000);
+        assert(std::fabs(engine.nightCycle.targetTemp - 30.0f) < 0.01f);
+
+        // Reject out-of-bounds high (> 31°C preserves previous setpoint)
+        engine.setNightCycle(true, 35.0f, 22, 0, 25.0f, 5000);
+        assert(std::fabs(engine.nightCycle.targetTemp - 30.0f) < 0.01f);
+
+        // 2. Already cool check with custom target
+        // When room is 23°C and target is 25°C -> already cool -> enters Pause1
+        engine.setNightCycle(true, 25.0f, 22, 0, 23.0f, 6000);
+        assert(std::fabs(engine.nightCycle.targetTemp - 25.0f) < 0.01f);
+        assert(engine.nightCycleStage == TestAutomationEngine::NC_PAUSE1_30M);
+
+        // But when room is 23°C and target is 21°C -> NOT cool -> enters Initial Pulldown
+        engine.setNightCycle(true, 21.0f, 22, 0, 23.0f, 7000);
+        assert(std::fabs(engine.nightCycle.targetTemp - 21.0f) < 0.01f);
+        assert(engine.nightCycleStage == TestAutomationEngine::NC_INITIAL_PULLDOWN);
+
+        // 3. Time-calibrated stages with configurable target:
+        // 11 PM (23:00) with warm room -> Initial Pulldown
+        engine.setNightCycle(true, 24.0f, 23, 0, 27.0f, 8000);
+        assert(engine.nightCycleStage == TestAutomationEngine::NC_INITIAL_PULLDOWN);
+        // 11 PM with already cool room -> Pause 2
+        engine.setNightCycle(true, 24.0f, 23, 0, 22.0f, 9000);
+        assert(engine.nightCycleStage == TestAutomationEngine::NC_PAUSE2_40M);
+
+        // Midnight (01:00) with warm room -> Midnight Cool
+        engine.setNightCycle(true, 23.0f, 1, 0, 26.0f, 10000);
+        assert(engine.nightCycleStage == TestAutomationEngine::NC_MIDNIGHT_COOL);
+        // Midnight (01:00) with already cool room -> Midnight Pause
+        engine.setNightCycle(true, 23.0f, 1, 0, 22.0f, 11000);
+        assert(engine.nightCycleStage == TestAutomationEngine::NC_MIDNIGHT_PAUSE);
+
+        // 3 AM - 5 AM window -> Pre-dawn burst
+        engine.setNightCycle(true, 22.0f, 4, 0, 25.0f, 12000);
+        assert(engine.nightCycleStage == TestAutomationEngine::NC_PREDAWN_BURST);
+        assert(engine.nightCycle.preDawnTriggered == true);
+
+        // 4. Remaining time calculation
+        assert(engine.getNightCycleStageRemainingSec(12000) == 1200);
+        assert(engine.getNightCycleStageRemainingSec(12000 + 300000) == 900);
+
+        // 5. Dynamic freeze protection calculation
+        float freeze27 = std::min(18.0f, std::max(15.0f, 27.0f - 1.0f));
+        assert(std::fabs(freeze27 - 18.0f) < 0.01f);
+        float freeze16 = std::min(18.0f, std::max(15.0f, 16.0f - 1.0f));
+        assert(std::fabs(freeze16 - 15.0f) < 0.01f);
+
+        // Target byte clamping
+        uint8_t tb = (uint8_t)std::round(engine.nightCycle.targetTemp);
+        assert(tb == 22);
+
+        // 6. Preservation of target temperature on toggle off
+        engine.setNightCycle(false);
+        assert(engine.nightCycle.enabled == false);
+        assert(engine.nightCycleStage == TestAutomationEngine::NC_INACTIVE);
+        assert(std::fabs(engine.nightCycle.targetTemp - 22.0f) < 0.01f);
+
+        // 7. Preservation of active stage when updating targetTemp while running
+        engine.setNightCycle(true, 23.0f, 4, 0, 25.0f, 13000);
+        assert(engine.nightCycleStage == TestAutomationEngine::NC_PREDAWN_BURST);
+        assert(std::fabs(engine.nightCycle.targetTemp - 23.0f) < 0.01f);
+
+        // Update target to 24.0C without overriding time
+        engine.setNightCycle(true, 24.0f, -1, -1, 25.0f, 13100);
+        assert(engine.nightCycle.enabled == true);
+        assert(engine.nightCycleStage == TestAutomationEngine::NC_PREDAWN_BURST); // Must NOT reset stage!
+        assert(std::fabs(engine.nightCycle.targetTemp - 24.0f) < 0.01f);
+        assert(engine.nightCycle.stageStartTimeMs == 13000); // Must NOT reset start time!
+
+        std::cout << "[TEST 78] PASS: Night Sleep Automation configurable target temperature [16°C - 30°C] and multi-phase thermal execution" << std::endl;
+    }
+
+    std::cout << "\nALL 78 UNIT TESTS PASSED SUCCESSFULLY!" << std::endl;
     return 0;
 }
 
