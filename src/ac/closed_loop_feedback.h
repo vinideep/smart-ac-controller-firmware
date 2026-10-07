@@ -12,7 +12,8 @@ enum class DesyncStatus {
     Synchronized,
     Verifying,
     Retrying,
-    DesyncDetected
+    DesyncDetected,
+    ThermalStallDesync
 };
 
 class ClosedLoopFeedback {
@@ -20,7 +21,7 @@ public:
     ClosedLoopFeedback(AzureEssenceController& ac, sensors::EnergyMonitor& energy);
 
     void begin();
-    void update(uint32_t nowMs = 0);
+    void update(uint32_t nowMs = 0, float currentTemp = -999.0f);
 
     void notifyCommandSent(const ACState& targetState, uint32_t nowMs = 0);
 
@@ -37,6 +38,9 @@ public:
     const char* getStatusStr() const;
     uint8_t getRetryCount() const { return _currentRetry; }
 
+    bool isThermalStallDesync() const { return _thermalStallDesync; }
+    void clearThermalStallDesync();
+
     void toJSON(JsonDocument& doc) const;
 
 private:
@@ -51,6 +55,10 @@ private:
     uint32_t _verifyTimeoutMs = 45000; // 45s default for compressor ramp-up
     uint8_t _maxRetries = 2;
     uint8_t _currentRetry = 0;
+
+    uint32_t _coolingStartTimeMs = 0;
+    float _coolingStartTemp = 0.0f;
+    bool _thermalStallDesync = false;
 
     uint32_t _extHighPowerStart = 0;
     uint32_t _extStandbyStart = 0;

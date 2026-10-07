@@ -206,7 +206,8 @@ public:
     }
 
     void accumulateEnergy(uint32_t nowMs) {
-        if (_lastUpdateTime == 0) {
+        if (!_initialized) {
+            _initialized = true;
             _lastUpdateTime = nowMs;
             _reading.timestamp_ms = nowMs;
             return;
@@ -265,11 +266,11 @@ public:
         _reading.timestamp_ms = nowMs;
         _reading.valid = true;
 
-        if (!isPowered) {
+        if (!isPowered || _thermalStallSuspended) {
             _reading.power_watts = 2.5f;
             _reading.power_factor = 0.65f;
             _reading.current = _reading.power_watts / (_reading.voltage * _reading.power_factor);
-            _reading.status = "standby";
+            _reading.status = _thermalStallSuspended ? "thermal_stall_desync" : "standby";
             return;
         }
 
@@ -331,12 +332,24 @@ public:
     float getTariff() const { return _reading.tariff_rate; }
     float getNominalVoltage() const { return _nominalVoltage; }
 
+    void setThermalStallSuspended(bool suspended) {
+        _thermalStallSuspended = suspended;
+        if (suspended) {
+            _reading.power_watts = 2.5f;
+            _reading.power_factor = 0.65f;
+            _reading.current = _reading.power_watts / (_reading.voltage * _reading.power_factor);
+            _reading.status = "thermal_stall_desync";
+        }
+    }
+    bool isThermalStallSuspended() const { return _thermalStallSuspended; }
+
 private:
     TestEnergyReading _reading;
     float _nominalVoltage;
     double _accumulatedKwh = 0.0;
     uint32_t _lastUpdateTime = 0;
     bool _initialized = false;
+    bool _thermalStallSuspended = false;
 };
 
 // Host simulation of PresenceSensorDriver (Phase 7)
@@ -393,6 +406,48 @@ public:
     uint32_t emptyTimeoutSeconds = 900;
     bool presenceDetectionEnabled = true;
     bool continuousInverterMode = false;
+    bool userManualPowerOff = false;
+
+    uint32_t _lastSyncEpochSec = 0;
+    uint32_t _lastSyncMillis = 0;
+    int16_t _tzOffsetMin = 330;
+
+    void syncTime(uint32_t epochSec, int16_t tzOffsetMin = 330, uint32_t currentMillis = 0) {
+        if (epochSec > 1700000000) {
+            _lastSyncEpochSec = epochSec;
+            _lastSyncMillis = currentMillis;
+            _tzOffsetMin = tzOffsetMin;
+        }
+    }
+
+    bool getLocalTime(uint8_t& outHour, uint8_t& outMinute, uint8_t& outSecond, uint32_t currentMillis = 0) const {
+        if (_lastSyncEpochSec > 1700000000) {
+            time_t nowSec = (time_t)(_lastSyncEpochSec + (currentMillis - _lastSyncMillis) / 1000);
+            time_t localSec = nowSec + (time_t)_tzOffsetMin * 60;
+            struct tm ti;
+            gmtime_r(&localSec, &ti);
+            outHour = ti.tm_hour;
+            outMinute = ti.tm_min;
+            outSecond = ti.tm_sec;
+            return true;
+        }
+        outHour = 22;
+        outMinute = 0;
+        outSecond = 0;
+        return false;
+    }
+
+    uint8_t getLocalHour(uint32_t currentMillis = 0) const {
+        uint8_t h, m, s;
+        getLocalTime(h, m, s, currentMillis);
+        return h;
+    }
+
+    uint8_t getLocalMinute(uint32_t currentMillis = 0) const {
+        uint8_t h, m, s;
+        getLocalTime(h, m, s, currentMillis);
+        return m;
+    }
 
     enum Action { NONE, TURN_ON, TURN_OFF };
 
@@ -411,7 +466,7 @@ public:
         }
 
         // Rule 2: Cooling trigger
-        if (!acOn && effectivePresence && currentTemp > (targetTemperature + hysteresis)) {
+        if (!acOn && effectivePresence && !userManualPowerOff && currentTemp > (targetTemperature + hysteresis)) {
             const char* reason = nullptr;
             if (safety.canTurnOn(now, reason)) {
                 return TURN_ON;
@@ -454,6 +509,7 @@ public:
     uint32_t breachWindowMs = 180000;
     bool presenceDetectionEnabled = true;
     bool continuousInverterMode = false;
+    bool userManualPowerOff = false;
 
     // Sleep config
     bool sleepEnabled = false;
@@ -571,7 +627,7 @@ public:
                 if (acPower) {
                     acTemp = (uint8_t)std::round(baseTargetTemp);
                     acFan = "auto";
-                } else if (apparentTemp > baseTargetTemp) {
+                } else if (apparentTemp > baseTargetTemp && !userManualPowerOff) {
                     const char* reason = nullptr;
                     if (safety.canTurnOn(now, reason)) {
                         acPower = true;
@@ -615,7 +671,7 @@ public:
 
         // Psychrometric arbitration
         if (psychrometricEnabled && currentHum > dryModeHumidityThreshold && currentTemp >= 21.0f && currentTemp <= 27.5f) {
-            if (!acPower && effectivePresence) {
+            if (!acPower && effectivePresence && !userManualPowerOff) {
                 const char* reason = nullptr;
                 if (safety.canTurnOn(now, reason)) {
                     acMode = "dry";
@@ -639,7 +695,7 @@ public:
         }
 
         // Regulation
-        if (!acPower && effectivePresence && apparentTemp > (targetTemperature + hysteresis)) {
+        if (!acPower && effectivePresence && !userManualPowerOff && apparentTemp > (targetTemperature + hysteresis)) {
             const char* reason = nullptr;
             if (safety.canTurnOn(now, reason)) {
                 acPower = true;
@@ -657,6 +713,103 @@ public:
             }
         }
     }
+};
+
+class TestClosedLoopFeedback {
+public:
+    enum class DesyncStatus { Synchronized, Verifying, Retrying, DesyncDetected, ThermalStallDesync };
+
+    explicit TestClosedLoopFeedback(TestEnergyMonitor& energy) : _energy(energy) {}
+
+    void notifyCommandSent(bool power, uint32_t nowMs) {
+        _acPower = power;
+        _commandSentTimeMs = nowMs;
+        _pendingVerification = true;
+        _currentRetry = 0;
+        _status = DesyncStatus::Verifying;
+        if (power) {
+            _coolingStartTimeMs = 0;
+            _thermalStallDesync = false;
+        } else {
+            _coolingStartTimeMs = 0;
+            _thermalStallDesync = false;
+            _energy.setThermalStallSuspended(false);
+        }
+    }
+
+    void update(uint32_t nowMs, float currentTemp = -999.0f) {
+        if (_pendingVerification) {
+            uint32_t elapsed = nowMs - _commandSentTimeMs;
+            if (_acPower) {
+                if (_energy.getReading().power_watts >= 20.0f) {
+                    _status = DesyncStatus::Synchronized;
+                    _pendingVerification = false;
+                } else if (elapsed >= 45000) {
+                    if (_currentRetry < 2) {
+                        _currentRetry++;
+                        _status = DesyncStatus::Retrying;
+                        _commandSentTimeMs = nowMs;
+                    } else {
+                        _status = DesyncStatus::DesyncDetected;
+                        _pendingVerification = false;
+                    }
+                }
+            } else {
+                if (_energy.getReading().power_watts < 20.0f) {
+                    _status = DesyncStatus::Synchronized;
+                    _pendingVerification = false;
+                }
+            }
+        }
+
+        // Thermal rate dT/dt stall detection
+        if (_acPower && currentTemp > -50.0f) {
+            if (_coolingStartTimeMs == 0) {
+                _coolingStartTimeMs = nowMs;
+                _coolingStartTemp = currentTemp;
+            } else {
+                uint32_t elapsedCooling = nowMs - _coolingStartTimeMs;
+                if (elapsedCooling >= 480000) { // 8 minutes (480s)
+                    if (currentTemp >= _coolingStartTemp) {
+                        _status = DesyncStatus::ThermalStallDesync;
+                        if (!_thermalStallDesync) {
+                            _thermalStallDesync = true;
+                            _energy.setThermalStallSuspended(true);
+                        }
+                    } else if (_thermalStallDesync && currentTemp < _coolingStartTemp - 0.5f) {
+                        _thermalStallDesync = false;
+                        _energy.setThermalStallSuspended(false);
+                        _status = DesyncStatus::Synchronized;
+                        _coolingStartTimeMs = nowMs;
+                        _coolingStartTemp = currentTemp;
+                    }
+                }
+            }
+        } else if (!_acPower) {
+            _coolingStartTimeMs = 0;
+            if (_thermalStallDesync) {
+                _thermalStallDesync = false;
+                _energy.setThermalStallSuspended(false);
+                if (_status == DesyncStatus::ThermalStallDesync) {
+                    _status = DesyncStatus::Synchronized;
+                }
+            }
+        }
+    }
+
+    DesyncStatus getStatus() const { return _status; }
+    bool isThermalStallDesync() const { return _thermalStallDesync; }
+
+private:
+    TestEnergyMonitor& _energy;
+    bool _acPower = false;
+    DesyncStatus _status = DesyncStatus::Synchronized;
+    bool _pendingVerification = false;
+    uint32_t _commandSentTimeMs = 0;
+    uint8_t _currentRetry = 0;
+    uint32_t _coolingStartTimeMs = 0;
+    float _coolingStartTemp = 0.0f;
+    bool _thermalStallDesync = false;
 };
 
 int main() {
@@ -2078,7 +2231,143 @@ int main() {
         std::cout << "[TEST 71] PASS: 2000W AC pulldown consumes exactly 1.0 Unit (1.0 kWh) in 30 minutes (I = 8.96A)" << std::endl;
     }
 
-    std::cout << "\nALL 71 UNIT TESTS PASSED SUCCESSFULLY!" << std::endl;
+    // Test 72: User manual power off override blocks autonomous re-powering across Rule 2, Welcome-back, and Psychro mode
+    {
+        // Part A: Rule 2 in TestAutomationEngine
+        TestAutomationEngine autoEngine;
+        TestSafetyManager autoSafety(180000, 300000, 2000);
+        autoEngine.enabled = true;
+        autoEngine.targetTemperature = 25.0f;
+        autoEngine.hysteresis = 1.0f;
+        autoEngine.userManualPowerOff = true;
+
+        // Room is 27.5C (> 25 + 1 = 26C). If manual power off override is active, do NOT turn on!
+        auto action = autoEngine.evaluate(false, true, 0, 27.5f, 10000, autoSafety);
+        assert(action == TestAutomationEngine::NONE);
+
+        // When user explicitly powers on or schedule clears override:
+        autoEngine.userManualPowerOff = false;
+        action = autoEngine.evaluate(false, true, 0, 27.5f, 10000, autoSafety);
+        assert(action == TestAutomationEngine::TURN_ON);
+
+        // Part B: TestSmartClimateEngine (Welcome-back & Psychrometric arbitration)
+        TestSmartClimateEngine climate;
+        climate.enabled = true;
+        climate.baseTargetTemp = 25.0f;
+        climate.targetTemperature = 25.0f;
+        climate.hysteresis = 1.0f;
+        climate.userManualPowerOff = true;
+        climate.lastPresenceState = false;
+        climate.presenceTier = TestSmartClimateEngine::TIER_VACANT;
+
+        // Occupant enters warm room (28.0C, heat index 29C) -> Welcome back tier triggered, but AC must stay OFF!
+        climate.update(true, 0, 28.0f, 60.0f, 29.0f, 15000, autoSafety);
+        assert(climate.presenceTier == TestSmartClimateEngine::TIER_WELCOME_BACK);
+        assert(!climate.acPower);
+
+        // High humidity (75%, 24C) -> Psychrometric trigger, but AC must stay OFF due to user override!
+        climate.update(true, 0, 24.0f, 75.0f, 24.0f, 20000, autoSafety);
+        assert(!climate.acPower);
+
+        // Explicit user toggle clears override:
+        climate.userManualPowerOff = false;
+        climate.update(true, 0, 28.0f, 60.0f, 29.0f, 25000, autoSafety);
+        assert(climate.acPower);
+        assert(climate.acMode == "cool");
+
+        std::cout << "[TEST 72] PASS: User manual power off override reliably inhibits autonomous turn-on until user toggle" << std::endl;
+    }
+
+    // Test 73: ESP32 timezone synchronization via epoch & tz_offset_min
+    {
+        TestAutomationEngine autoEngine;
+        // Default un-synced clock
+        assert(autoEngine.getLocalHour() == 22);
+
+        // Given an epoch of 1775560800 (which corresponds to 11:20:00 UTC)
+        // With IST offset of +330 minutes (+05:30), localized time is 16:50:00 (4:50 PM)
+        autoEngine.syncTime(1775560800, 330, 10000);
+        assert(autoEngine.getLocalHour(10000) == 16);
+        assert(autoEngine.getLocalMinute(10000) == 50);
+
+        // Advance simulated time by 20 minutes (1200 seconds = 1,200,000 ms)
+        assert(autoEngine.getLocalHour(10000 + 1200000) == 17);
+        assert(autoEngine.getLocalMinute(10000 + 1200000) == 10);
+
+        // Test with different timezone: New York EST (-300 min = -05:00) -> 06:20:00 AM
+        autoEngine.syncTime(1775560800, -300, 0);
+        assert(autoEngine.getLocalHour(0) == 6);
+        assert(autoEngine.getLocalMinute(0) == 20);
+
+        // Test with Kathmandu Nepal (+345 min = +05:45) -> 17:05:00 (5:05 PM)
+        autoEngine.syncTime(1775560800, 345, 0);
+        assert(autoEngine.getLocalHour(0) == 17);
+        assert(autoEngine.getLocalMinute(0) == 5);
+
+        std::cout << "[TEST 73] PASS: ESP32 timezone synchronization correctly computes local hour and minute for IST (+05:30)" << std::endl;
+    }
+
+    // Test 74: ClosedLoopFeedback detects Thermal Stall Desync when AC commanded ON fails to drop room temperature after 8 mins
+    {
+        TestEnergyMonitor energy(8.0f, 230.0f);
+        energy.begin(0);
+        TestClosedLoopFeedback cl(energy);
+
+        // Command AC ON at t = 10,000 ms, room temperature is 29.5C
+        cl.notifyCommandSent(true, 10000);
+        energy.updateMeasurement(230.0f, 5.0f, 1150.0f, 0.97f, "cooling", 10000);
+        cl.update(10000, 29.5f);
+        assert(cl.getStatus() == TestClosedLoopFeedback::DesyncStatus::Synchronized);
+        assert(!cl.isThermalStallDesync());
+
+        // At t = 200,000 ms (3.3 mins), room is still 29.5C (within 8 min window)
+        cl.update(200000, 29.5f);
+        assert(!cl.isThermalStallDesync());
+
+        // At t = 495,000 ms (8.08 mins elapsed since 10,000 ms), room temperature is 29.6C (failed to drop!)
+        cl.update(495000, 29.6f);
+        assert(cl.getStatus() == TestClosedLoopFeedback::DesyncStatus::ThermalStallDesync);
+        assert(cl.isThermalStallDesync());
+        assert(energy.isThermalStallSuspended());
+
+        // When physical cooling resumes and temperature drops to 28.5C (< start - 0.5C):
+        cl.update(550000, 28.5f);
+        assert(!cl.isThermalStallDesync());
+        assert(!energy.isThermalStallSuspended());
+        assert(cl.getStatus() == TestClosedLoopFeedback::DesyncStatus::Synchronized);
+
+        std::cout << "[TEST 74] PASS: 8-minute thermal stall desync triggers when room temperature fails to drop during cooling" << std::endl;
+    }
+
+    // Test 75: EnergyMonitor clamps synthetic power accumulation to 2.5W standby during thermal stall desync
+    {
+        TestEnergyMonitor energy(8.0f, 230.0f);
+        energy.begin(0);
+
+        // Under normal active cooling at 28C ambient with 24C setpoint:
+        energy.updateFromAcState(true, "cool", "auto", 24, 28.0f, 0);
+        assert(energy.getReading().power_watts > 1000.0f);
+
+        // Thermal stall desync detected -> suspend synthetic power
+        energy.setThermalStallSuspended(true);
+        energy.updateFromAcState(true, "cool", "auto", 24, 28.0f, 1000);
+        assert(energy.getReading().power_watts == 2.5f);
+        assert(std::string(energy.getReading().status) == "thermal_stall_desync");
+
+        // Advance 1 full hour (3,600,000 ms) in thermal stall mode
+        energy.update(3601000UL);
+        // At 2.5W for 1 hour, energy accumulated should be exactly 0.0025 kWh (not 1.4 kWh)
+        assert(energy.getReading().energy_kwh_today <= 0.003f);
+
+        // Stall resolved -> power restores
+        energy.setThermalStallSuspended(false);
+        energy.updateFromAcState(true, "cool", "auto", 24, 28.0f, 3602000UL);
+        assert(energy.getReading().power_watts > 1000.0f);
+
+        std::cout << "[TEST 75] PASS: Thermal stall suspension clamps synthetic energy accumulation to 2.5W standby" << std::endl;
+    }
+
+    std::cout << "\nALL 75 UNIT TESTS PASSED SUCCESSFULLY!" << std::endl;
     return 0;
 }
 

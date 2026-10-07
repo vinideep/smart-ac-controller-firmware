@@ -54,9 +54,17 @@ void ClosedLoopFeedback::notifyCommandSent(const ACState& targetState, uint32_t 
     _pendingVerification = true;
     _currentRetry = 0;
     _status = DesyncStatus::Verifying;
+    if (targetState.power) {
+        _coolingStartTimeMs = 0;
+        _thermalStallDesync = false;
+    } else {
+        _coolingStartTimeMs = 0;
+        _thermalStallDesync = false;
+        _energy.setThermalStallSuspended(false);
+    }
 }
 
-void ClosedLoopFeedback::update(uint32_t nowMs) {
+void ClosedLoopFeedback::update(uint32_t nowMs, float currentTemp) {
     if (!_enabled) return;
     uint32_t now = (nowMs == 0) ? millis() : nowMs;
 
@@ -142,6 +150,54 @@ void ClosedLoopFeedback::update(uint32_t nowMs) {
             }
         }
     }
+
+    // Thermal rate (dT/dt) monitoring: detect if AC commanded ON fails to cool room after 8 mins
+    if (_ac.getState().power) {
+        if (currentTemp > -50.0f) {
+            if (_coolingStartTimeMs == 0) {
+                _coolingStartTimeMs = now;
+                _coolingStartTemp = currentTemp;
+            } else {
+                uint32_t elapsedCooling = now - _coolingStartTimeMs;
+                if (elapsedCooling >= 480000) { // 8 minutes (480s)
+                    if (currentTemp >= _coolingStartTemp) {
+                        _status = DesyncStatus::ThermalStallDesync;
+                        if (!_thermalStallDesync) {
+                            _thermalStallDesync = true;
+                            _energy.setThermalStallSuspended(true);
+                            Serial.printf("[CLOSED_LOOP] THERMAL STALL DESYNC: AC ON for 8m but room failed to cool (%.1fC -> %.1fC). Suspending synthetic energy.\n",
+                                          _coolingStartTemp, currentTemp);
+                        }
+                    } else if (_thermalStallDesync && currentTemp < _coolingStartTemp - 0.5f) {
+                        _thermalStallDesync = false;
+                        _energy.setThermalStallSuspended(false);
+                        _status = DesyncStatus::Synchronized;
+                        _coolingStartTimeMs = now;
+                        _coolingStartTemp = currentTemp;
+                        Serial.println("[CLOSED_LOOP] Thermal stall resolved. Resumed energy accumulation.");
+                    }
+                }
+            }
+        }
+    } else {
+        _coolingStartTimeMs = 0;
+        if (_thermalStallDesync) {
+            _thermalStallDesync = false;
+            _energy.setThermalStallSuspended(false);
+            if (_status == DesyncStatus::ThermalStallDesync) {
+                _status = DesyncStatus::Synchronized;
+            }
+        }
+    }
+}
+
+void ClosedLoopFeedback::clearThermalStallDesync() {
+    _thermalStallDesync = false;
+    _coolingStartTimeMs = 0;
+    _energy.setThermalStallSuspended(false);
+    if (_status == DesyncStatus::ThermalStallDesync) {
+        _status = DesyncStatus::Synchronized;
+    }
 }
 
 const char* ClosedLoopFeedback::getStatusStr() const {
@@ -149,6 +205,7 @@ const char* ClosedLoopFeedback::getStatusStr() const {
         case DesyncStatus::Verifying: return "verifying";
         case DesyncStatus::Retrying: return "retrying";
         case DesyncStatus::DesyncDetected: return "desync_detected";
+        case DesyncStatus::ThermalStallDesync: return "thermal_stall_desync";
         case DesyncStatus::Synchronized:
         default: return "synchronized";
     }
@@ -157,6 +214,7 @@ const char* ClosedLoopFeedback::getStatusStr() const {
 void ClosedLoopFeedback::toJSON(JsonDocument& doc) const {
     doc["enabled"] = _enabled;
     doc["status"] = getStatusStr();
+    doc["thermal_stall_desync"] = _thermalStallDesync;
     doc["pending_verification"] = _pendingVerification;
     doc["retry_count"] = _currentRetry;
     doc["max_retries"] = _maxRetries;

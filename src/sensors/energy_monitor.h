@@ -101,6 +101,17 @@ public:
     bool isStandby() const { return _reading.power_watts < 20.0f; }
     bool isHardwareSensorActive() const { return _hardwareSensorActive; }
 
+    void setThermalStallSuspended(bool suspended) {
+        _thermalStallSuspended = suspended;
+        if (suspended && !_hardwareSensorActive) {
+            _reading.power_watts = 2.5f;
+            _reading.power_factor = 0.65f;
+            _reading.current = _reading.power_watts / (_reading.voltage * _reading.power_factor);
+            _reading.status = "thermal_stall_desync";
+        }
+    }
+    bool isThermalStallSuspended() const { return _thermalStallSuspended; }
+
     /**
      * @brief Samples physical analog current from a CT clamp or ACS712 sensor.
      * @param pin Analog ADC pin (e.g. GPIO 34)
@@ -131,6 +142,7 @@ private:
     uint32_t _lastUpdateTime = 0;
     bool _initialized = false;
     bool _hardwareSensorActive = false;
+    bool _thermalStallSuspended = false;
 
     void accumulateEnergy(uint32_t nowMs);
 };

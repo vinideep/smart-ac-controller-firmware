@@ -17,6 +17,10 @@ AutomationEngine::AutomationEngine(control::ACController& ac,
 
 void AutomationEngine::syncTime(uint32_t epochSec, int16_t tzOffsetMin) {
     if (epochSec > 1700000000) {
+        _lastSyncEpochSec = epochSec;
+        _lastSyncMillis = millis();
+        _tzOffsetMin = tzOffsetMin;
+
         timeval tv = { .tv_sec = (time_t)epochSec, .tv_usec = 0 };
         settimeofday(&tv, nullptr);
         char tzBuf[32];
@@ -30,15 +34,15 @@ void AutomationEngine::syncTime(uint32_t epochSec, int16_t tzOffsetMin) {
 }
 
 bool AutomationEngine::hasValidTime() const {
-    time_t nowSec = time(nullptr);
-    return (nowSec > 1700000000);
+    return (_lastSyncEpochSec > 1700000000);
 }
 
 bool AutomationEngine::getLocalTime(uint8_t& outHour, uint8_t& outMinute, uint8_t& outSecond) const {
-    time_t nowSec = time(nullptr);
-    if (nowSec > 1700000000) {
+    if (_lastSyncEpochSec > 1700000000) {
+        time_t nowSec = (time_t)(_lastSyncEpochSec + (millis() - _lastSyncMillis) / 1000);
+        time_t localSec = nowSec + (time_t)_tzOffsetMin * 60;
         struct tm ti;
-        localtime_r(&nowSec, &ti);
+        gmtime_r(&localSec, &ti);
         outHour = ti.tm_hour;
         outMinute = ti.tm_min;
         outSecond = ti.tm_sec;
@@ -198,9 +202,16 @@ void AutomationEngine::setContinuousInverterMode(bool enable) {
     logEvent(enable ? "inverter_mode_enabled" : "cycling_mode_enabled", "config_update", _dht.getLatestReading().temperature_c);
 }
 
+void AutomationEngine::setUserManualPowerOff(bool manualOff) {
+    _userManualPowerOff = manualOff;
+    logEvent(manualOff ? "manual_power_off_override_set" : "manual_power_off_override_cleared",
+             "manual_user_action", _dht.getLatestReading().temperature_c);
+}
+
 void AutomationEngine::setCircadianSleep(bool enable, uint8_t pulldown, float ramp, float maxTemp) {
     _config.sleepConfig.enabled = enable;
     if (enable) {
+        _userManualPowerOff = false;
         _config.sleepConfig.pulldownTemp = (pulldown >= 18 && pulldown <= 28) ? pulldown : 23;
         _config.sleepConfig.rampRatePerHr = (ramp >= 0.1f && ramp <= 2.0f) ? ramp : 0.5f;
         _config.sleepConfig.maxRampTemp = (maxTemp >= 20.0f && maxTemp <= 30.0f) ? maxTemp : 25.5f;
@@ -248,6 +259,7 @@ void AutomationEngine::setNightCycle(bool enable, float targetTemp, int8_t overr
         _config.nightCycle.stageStartTimeMs = millis();
         _config.nightCycle.preDawnTriggered = false;
         _config.enabled = true; // Ensure automation loop evaluates night cycle
+        _userManualPowerOff = false;
 
         const DHTReading& initReading = _dht.getLatestReading();
         bool alreadyCool = initReading.valid && (initReading.temperature_c <= _config.nightCycle.targetTemp);
@@ -780,7 +792,7 @@ void AutomationEngine::update() {
                 _ac.setState(true, restored, _ac.getState().mode, "auto", "welcome_back");
                 _safety.recordCommandSent(now);
                 logEvent("welcome_back_motion", "setpoint_restored", currentTemp);
-            } else if (apparentTemp > _config.baseTargetTemp) {
+            } else if (apparentTemp > _config.baseTargetTemp && !_userManualPowerOff) {
                 const char* reason = nullptr;
                 if (_safety.canTurnOn(now, reason)) {
                     _ac.setState(true, (uint8_t)round(_config.baseTargetTemp), "cool", "auto", "welcome_back");
@@ -829,7 +841,7 @@ void AutomationEngine::update() {
     // 4. Psychrometric Mode Arbitration
     // If humidity is high (>65%) but room temp is mild (21C to 27.5C), switch to DRY (dehumidify)
     if (_config.psychrometricEnabled && currentHum > _config.dryModeHumidityThreshold && currentTemp >= 21.0f && currentTemp <= 27.5f) {
-        if (!acOn && effectivePresence) {
+        if (!acOn && effectivePresence && !_userManualPowerOff) {
             const char* reason = nullptr;
             if (_safety.canTurnOn(now, reason)) {
                 _ac.setState(true, _ac.getState().temperature, "dry", _ac.getState().fanSpeed, "psychro_humidity_arbitration");
@@ -875,7 +887,7 @@ void AutomationEngine::update() {
 
     // 6. Standard Closed-Loop Thermal Regulation (Heat-Index or Raw Temp)
     // Rule: Room hotter than target threshold -> turn ON
-    if (!acOn && effectivePresence && apparentTemp > (_config.targetTemperature + _config.hysteresis)) {
+    if (!acOn && effectivePresence && !_userManualPowerOff && apparentTemp > (_config.targetTemperature + _config.hysteresis)) {
         const char* reason = nullptr;
         if (_safety.canTurnOn(now, reason)) {
             _ac.setState(true, (uint8_t)round(_config.targetTemperature), "cool", _ac.getState().fanSpeed, "automation_climate");
@@ -953,6 +965,7 @@ void AutomationEngine::toJSON(JsonDocument& doc) const {
     doc["local_time_str"] = timeStr;
     doc["local_hour"] = curH;
     doc["local_minute"] = curM;
+    doc["manual_power_off_override"] = _userManualPowerOff;
 }
 
 } // namespace ac::automation

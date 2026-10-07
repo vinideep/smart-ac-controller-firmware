@@ -161,9 +161,13 @@ public:
     NightCycleStage getNightCycleStage() const { return _nightCycleStage; }
     const char* getNightCycleStageStr() const;
     uint32_t getNightCycleStageRemainingSec() const;
+    float getNightCycleTargetTemp() const { return _config.nightCycle.targetTemp; }
 
     PresenceTier getPresenceTier() const { return _presenceTier; }
     const char* getPresenceTierStr() const;
+
+    void setUserManualPowerOff(bool manualOff);
+    bool isUserManualPowerOff() const { return _userManualPowerOff; }
 
     void toJSON(JsonDocument& doc) const;
 
@@ -183,6 +187,11 @@ private:
     bool _turnedOffByVacancy = false;
     bool _thermalBreachActive = false;
     float _thermalBreachDelta = 0.0f;
+    bool _userManualPowerOff = false;
+
+    uint32_t _lastSyncEpochSec = 0;
+    uint32_t _lastSyncMillis = 0;
+    int16_t _tzOffsetMin = 330;
 
     // Rolling buffer for breach detection (sampled every 10s up to 24 samples = 4 mins)
     static constexpr size_t kBreachBufferSize = 24;

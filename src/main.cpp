@@ -88,6 +88,9 @@ void setup() {
     // 6. Initialize Network Manager (Wi-Fi STA / Fallback AP) & Local REST Server
     networkManager.begin(WIFI_SSID, WIFI_PASSWORD, WIFI_HOSTNAME);
     apiServer.begin(80);
+    cloudClient.setTimeSyncCallback([](uint32_t epochSec, int16_t tzOffsetMin) {
+        automationEngine.syncTime(epochSec, tzOffsetMin);
+    });
     cloudClient.begin();
 
     // 7. Print boot banner and device information
@@ -130,6 +133,7 @@ void processCommand(const String& rawCmd) {
                     safetyManager.recordPowerTransition(pwr, millis());
                     safetyManager.recordCommandSent(millis());
                     closedLoopFeedback.notifyCommandSent(acController.getState(), millis());
+                    automationEngine.setUserManualPowerOff(!pwr);
                     digitalWrite(STATUS_LED_PIN, LOW);
                     Serial.printf("[CMD_OK] AC state set: Power=%d Temp=%d Mode=%s Fan=%s\n",
                                   pwr ? 1 : 0, temp, m, f);
@@ -144,6 +148,7 @@ void processCommand(const String& rawCmd) {
                 acController.setPower(pwr, "json_cmd");
                 safetyManager.recordPowerTransition(pwr, millis());
                 closedLoopFeedback.notifyCommandSent(acController.getState(), millis());
+                automationEngine.setUserManualPowerOff(!pwr);
                 digitalWrite(STATUS_LED_PIN, LOW);
                 Serial.printf("[CMD_OK] AC Power set to %s\n", pwr ? "ON" : "OFF");
             } else if (strcmp(commandType, "temp") == 0) {
@@ -177,16 +182,14 @@ void processCommand(const String& rawCmd) {
                 float maxT = doc["max_temp"] | 25.5f;
                 automationEngine.setCircadianSleep(en, pdown, ramp, maxT);
             } else if (strcmp(commandType, "night_cycle") == 0) {
-                bool en = doc["enabled"] | doc["value"] | false;
+                bool en = !doc["enabled"].isNull() ? doc["enabled"].as<bool>() : (!doc["value"].isNull() ? doc["value"].as<bool>() : false);
                 float tgt = doc["target_temp"] | doc["target"] | 27.0f;
                 int8_t h = doc["hour"] | -1;
                 int8_t m = doc["min"] | -1;
-                if (doc["epoch"].is<uint32_t>()) {
+                if (!doc["epoch"].isNull()) {
                     uint32_t ep = doc["epoch"].as<uint32_t>();
-                    if (ep > 1700000000) {
-                        timeval tv = { .tv_sec = (time_t)ep, .tv_usec = 0 };
-                        settimeofday(&tv, nullptr);
-                    }
+                    int16_t tzOff = doc["tz_offset_min"] | 330;
+                    automationEngine.syncTime(ep, tzOff);
                 }
                 automationEngine.setNightCycle(en, tgt, h, m);
                 Serial.printf("[CMD_OK] Night sleep cycle %s (Target: %.1fC, Location time: %02u:%02u)\n",
@@ -375,6 +378,7 @@ void processCommand(const String& rawCmd) {
                     safetyManager.recordPowerTransition(pwr, millis());
                     safetyManager.recordCommandSent(millis());
                     closedLoopFeedback.notifyCommandSent(acController.getState(), millis());
+                    automationEngine.setUserManualPowerOff(!pwr);
                     digitalWrite(STATUS_LED_PIN, LOW);
                     Serial.printf("[CMD_OK] AC state set: Power=%d Temp=%d Mode=%s Fan=%s\n",
                                   pwr ? 1 : 0, temp, mode.c_str(), fan.c_str());
@@ -394,6 +398,7 @@ void processCommand(const String& rawCmd) {
         acController.setPower(true, "manual_cmd");
         safetyManager.recordPowerTransition(true, millis());
         closedLoopFeedback.notifyCommandSent(acController.getState(), millis());
+        automationEngine.setUserManualPowerOff(false);
         digitalWrite(STATUS_LED_PIN, LOW);
         Serial.println("[CMD_OK] AC Power ON sent");
     } else if (upper == "POWER_OFF" || upper == "OFF") {
@@ -402,6 +407,7 @@ void processCommand(const String& rawCmd) {
         acController.setPower(false, "manual_cmd");
         safetyManager.recordPowerTransition(false, millis());
         closedLoopFeedback.notifyCommandSent(acController.getState(), millis());
+        automationEngine.setUserManualPowerOff(true);
         digitalWrite(STATUS_LED_PIN, LOW);
         Serial.println("[CMD_OK] AC Power OFF sent");
     } else if (upper.startsWith("SET_TEMP")) {
@@ -708,12 +714,14 @@ void loop() {
                     acController.applyExternalState(cap.acState);
                     safetyManager.recordPowerTransition(cap.acState.power, millis());
                     safetyManager.recordCommandSent(millis());
+                    automationEngine.setUserManualPowerOff(!cap.acState.power);
                     JsonDocument syncDoc;
                     syncDoc["device_id"] = deviceId;
                     syncDoc["power"] = cap.acState.power;
                     syncDoc["temperature"] = cap.acState.temperature;
                     syncDoc["mode"] = cap.acState.mode;
                     syncDoc["fan_speed"] = cap.acState.fanSpeed;
+                    syncDoc["manual_power_off_override"] = !cap.acState.power;
                     syncDoc["source"] = "ir_remote";
                     syncDoc["timestamp_ms"] = millis();
                     serializeJson(syncDoc, Serial);
@@ -779,10 +787,10 @@ void loop() {
     energyMonitor.sampleAdcCurrent(CURRENT_SENSOR_PIN, 30.0f);
 #endif
     energyMonitor.update(currentNow);
-    closedLoopFeedback.update(currentNow);
+    float currentAmbientTemp = dhtDriver.getLatestReading().valid ? dhtDriver.getLatestReading().temperature_c : 25.0f;
+    closedLoopFeedback.update(currentNow, currentAmbientTemp);
     if (currentNow - lastEnergyModelUpdate >= 1000) {
         lastEnergyModelUpdate = currentNow;
-        float currentAmbientTemp = dhtDriver.getLatestReading().valid ? dhtDriver.getLatestReading().temperature_c : 25.0f;
         energyMonitor.updateFromAcState(
             acController.getState().power,
             acController.getState().mode,
@@ -874,8 +882,11 @@ void loop() {
         cloudDoc["night_cycle_enabled"] = automationEngine.isNightCycleEnabled();
         cloudDoc["night_cycle_stage"] = automationEngine.getNightCycleStageStr();
         cloudDoc["night_cycle_stage_id"] = (uint8_t)automationEngine.getNightCycleStage();
-        cloudDoc["night_cycle_target_temp"] = 27.0f;
+        cloudDoc["night_cycle_target_temp"] = automationEngine.getNightCycleTargetTemp();
         cloudDoc["night_cycle_remaining_s"] = automationEngine.getNightCycleStageRemainingSec();
+        cloudDoc["manual_power_off_override"] = automationEngine.isUserManualPowerOff();
+        cloudDoc["thermal_stall_desync"] = closedLoopFeedback.isThermalStallDesync();
+        cloudDoc["thermal_stall_suspended"] = energyMonitor.isThermalStallSuspended();
         cloudDoc["timestamp_ms"] = millis();
 
         cloudClient.update(cloudDoc);

@@ -82,9 +82,14 @@ bool CloudClient::pushTelemetry(const JsonDocument& doc) {
         if (deserializeJson(resp, payload) == DeserializationError::Ok) {
             if (resp["epoch"].is<uint32_t>()) {
                 uint32_t ep = resp["epoch"].as<uint32_t>();
+                int16_t tz = resp["tz_offset_min"] | 330;
                 if (ep > 1700000000) {
-                    timeval tv = { .tv_sec = (time_t)ep, .tv_usec = 0 };
-                    settimeofday(&tv, nullptr);
+                    if (_timeSyncCb) {
+                        _timeSyncCb(ep, tz);
+                    } else {
+                        timeval tv = { .tv_sec = (time_t)ep, .tv_usec = 0 };
+                        settimeofday(&tv, nullptr);
+                    }
                 }
             }
             JsonArray cmds = resp["commands"].as<JsonArray>();
@@ -140,6 +145,13 @@ bool CloudClient::pollCommands() {
         // Parse response: {"commands":["POWER_ON","SET_TEMP 25"],"count":2}
         JsonDocument resp;
         if (deserializeJson(resp, payload) == DeserializationError::Ok) {
+            if (resp["epoch"].is<uint32_t>()) {
+                uint32_t ep = resp["epoch"].as<uint32_t>();
+                int16_t tz = resp["tz_offset_min"] | 330;
+                if (ep > 1700000000 && _timeSyncCb) {
+                    _timeSyncCb(ep, tz);
+                }
+            }
             JsonArray cmds = resp["commands"].as<JsonArray>();
             int count = 0;
             for (JsonVariant v : cmds) {

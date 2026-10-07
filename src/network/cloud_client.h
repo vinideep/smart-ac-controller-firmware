@@ -13,6 +13,7 @@
 
 #include <Arduino.h>
 #include <ArduinoJson.h>
+#include <functional>
 
 namespace ac {
 namespace cloud {
@@ -27,6 +28,8 @@ namespace cloud {
  */
 class CloudClient {
 public:
+    using TimeSyncCallback = std::function<void(uint32_t epochSec, int16_t tzOffsetMin)>;
+
     /**
      * @param backendUrl  Full HTTPS URL of backend, e.g. "https://smart-ac.up.railway.app"
      * @param deviceToken Shared secret matching DEVICE_TOKEN on backend env
@@ -37,6 +40,8 @@ public:
      * Call once in setup() after Wi-Fi is connected.
      */
     void begin();
+
+    void setTimeSyncCallback(TimeSyncCallback cb) { _timeSyncCb = cb; }
 
     /**
      * Call every loop() iteration.
@@ -83,6 +88,8 @@ private:
     uint8_t _qHead = 0;
     uint8_t _qTail = 0;
     uint8_t _qCount = 0;
+
+    TimeSyncCallback _timeSyncCb = nullptr;
 
     void enqueue(const String& cmd);
     bool pollCommands();

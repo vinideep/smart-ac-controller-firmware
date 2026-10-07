@@ -46,7 +46,8 @@ void EnergyMonitor::resetDaily() {
 }
 
 void EnergyMonitor::accumulateEnergy(uint32_t nowMs) {
-    if (_lastUpdateTime == 0) {
+    if (!_initialized) {
+        _initialized = true;
         _lastUpdateTime = nowMs;
         _reading.timestamp_ms = nowMs;
         return;
@@ -109,12 +110,12 @@ void EnergyMonitor::updateFromAcState(bool isPowered,
     _reading.timestamp_ms = currentMs;
     _reading.valid = true;
 
-    if (!isPowered) {
-        // Standby idle electronics draw
+    if (!isPowered || (_thermalStallSuspended && !_hardwareSensorActive)) {
+        // Standby idle electronics draw (or thermal stall desync clamp)
         _reading.power_watts = 2.5f;
         _reading.power_factor = 0.65f;
         _reading.current = _reading.power_watts / (_reading.voltage * _reading.power_factor);
-        _reading.status = "standby";
+        _reading.status = _thermalStallSuspended ? "thermal_stall_desync" : "standby";
         return;
     }
 
@@ -220,6 +221,7 @@ void EnergyMonitor::toJSON(JsonDocument& doc) const {
     doc["tariff_rate"] = round(_reading.tariff_rate * 100.0f) / 100.0f;
     doc["estimated_cost_today"] = round(_reading.estimated_cost_today * 100.0f) / 100.0f;
     doc["status"] = _reading.status;
+    doc["thermal_stall_suspended"] = _thermalStallSuspended;
     doc["timestamp_ms"] = _reading.timestamp_ms;
     doc["valid"] = _reading.valid;
 }
